@@ -269,12 +269,18 @@ class AIStyleScorer:
         brand_label = format_brand_name(product.brand)
         category_label = CATEGORY_LABELS_TR.get(product.category, product.category.value)
 
-        price_line = format_try_price(product.current_price)
-        if product.original_price is not None and product.original_price > product.current_price:
+        price_line = format_try_price(product.effective_price)
+        if product.cart_price is not None and product.cart_price < product.current_price:
+            price_line = f"Sepette {price_line} (Satış: {format_try_price(product.current_price)})"
+        if product.original_price is not None and product.original_price > product.effective_price:
             price_line = (
                 f"{price_line} (Liste: {format_try_price(product.original_price)}, "
                 f"%{product.discount_percent or 0} indirim)"
             )
+        elif product.discount_percent:
+            price_line = f"{price_line} (%{product.discount_percent} indirim)"
+        if product.promo_badge:
+            price_line = f"{price_line} · Kampanya: {product.promo_badge}"
 
         fabric_parts: list[str] = []
         if product.fabric_info:

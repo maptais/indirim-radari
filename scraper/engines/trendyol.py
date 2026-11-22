@@ -21,10 +21,12 @@ from .base import (
 from ..core.filters import extract_polyester_percent, turkish_lower
 from ..core.http import (
     HttpClient,
+    clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
     is_kids_product,
     parse_try_price,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -277,25 +279,95 @@ class TrendyolScraper(BaseScraper):
         return available_sizes, is_critical_stock, fabric_info, polyester_pct
 
     @staticmethod
-    def _extract_prices(price_obj: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
-        """Extract `(current_price, original_price)` from Trendyol's `price` object."""
+    def _extract_prices_and_promo(
+        raw: dict[str, Any],
+    ) -> tuple[Decimal | None, Decimal | None, Decimal | None, str | None]:
+        """Extract `(current_price, original_price, cart_price, promo_badge)` from Trendyol product JSON."""
+        price_obj = raw.get("price") or {}
         if not isinstance(price_obj, dict):
-            return None, None
+            return None, None, None, None
 
         discounted = parse_try_price(price_obj.get("discountedPrice"))
         current = parse_try_price(price_obj.get("current"))
+        selling = parse_try_price(price_obj.get("sellingPrice"))
         original = parse_try_price(price_obj.get("originalPrice"))
         old = parse_try_price(price_obj.get("old"))
-        selling = parse_try_price(price_obj.get("sellingPrice"))
 
-        candidates = [p for p in (discounted, current, selling, original, old) if p is not None]
-        if not candidates:
+        # Check Trendyol's `singlePrice` / `recommendedRetailPrice` as fallback for strikethrough
+        single_price = raw.get("singlePrice") if isinstance(raw.get("singlePrice"), dict) else {}
+        strike = parse_try_price(single_price.get("strikethroughPriceNumeric") or single_price.get("strikethroughPrice"))
+
+        # Determine storefront selling price vs explicit basket/cart price (`discountedPrice`)
+        selling_candidates = [p for p in (selling, current) if p is not None]
+        if selling_candidates:
+            current_price = min(selling_candidates)
+        elif discounted is not None:
+            current_price = discounted
+        elif original is not None:
+            current_price = original
+        elif old is not None:
+            current_price = old
+        else:
+            return None, None, None, None
+
+        orig_candidates = [p for p in (original, old, strike, selling, current) if p is not None and p > current_price]
+        original_price = max(orig_candidates) if orig_candidates else None
+
+        explicit_cart: Decimal | None = None
+        if discounted is not None and discounted < current_price:
+            explicit_cart = discounted
+
+        # Collect promo badge text from `promotions`, `singlePromotion`, `discount.discountName`
+        badge_candidates: list[str] = []
+        for promo in raw.get("promotions") or []:
+            if isinstance(promo, dict):
+                txt = clean_promo_badge_text(str(promo.get("name") or promo.get("title") or promo.get("text") or ""))
+                if txt:
+                    badge_candidates.append(txt)
+            elif isinstance(promo, str):
+                txt = clean_promo_badge_text(promo)
+                if txt:
+                    badge_candidates.append(txt)
+
+        single_promo = raw.get("singlePromotion")
+        if isinstance(single_promo, dict):
+            txt = clean_promo_badge_text(str(single_promo.get("name") or single_promo.get("title") or single_promo.get("text") or ""))
+            if txt:
+                badge_candidates.append(txt)
+        elif isinstance(single_promo, str):
+            txt = clean_promo_badge_text(single_promo)
+            if txt:
+                badge_candidates.append(txt)
+
+        disc_obj = raw.get("discount")
+        if isinstance(disc_obj, dict):
+            txt = clean_promo_badge_text(str(disc_obj.get("discountName") or ""))
+            if txt:
+                badge_candidates.append(txt)
+
+        chosen_badge = badge_candidates[0] if badge_candidates else None
+        for cand in badge_candidates:
+            low = turkish_lower(cand)
+            if "sepet" in low or "%" in low:
+                chosen_badge = cand
+                break
+
+        cart_price, promo_badge = resolve_cart_promo(
+            current_price,
+            explicit_cart_price=explicit_cart,
+            promo_badge=chosen_badge,
+        )
+        return current_price, original_price, cart_price, promo_badge
+
+    @staticmethod
+    def _extract_prices(price_obj: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
+        """Backward-compatible price extractor returning `(effective_current, original)`."""
+        cur, orig, cart, _ = TrendyolScraper._extract_prices_and_promo({"price": price_obj})
+        if cur is None:
             return None, None
-
-        eff_current = min(candidates)
-        eff_max = max(candidates)
-        eff_original = eff_max if eff_max > eff_current else None
-        return eff_current, eff_original
+        eff = cart if (cart is not None and cart < cur) else cur
+        ref_orig = orig if (orig is not None and orig > eff) else (cur if eff < cur else None)
+        return eff, ref_orig
 
     def _infer_gender(self, raw: dict[str, Any], category_path: str = "") -> ProductGender:
         title = str(raw.get("name") or "")
@@ -341,10 +413,10 @@ class TrendyolScraper(BaseScraper):
         if not self._matches_brand_and_section(raw):
             return None
 
-        current_price, original_price = self._extract_prices(raw.get("price") or {})
+        current_price, original_price, cart_price, promo_badge = self._extract_prices_and_promo(raw)
         if current_price is None:
             return None
-        if self.only_discounted and original_price is None:
+        if self.only_discounted and original_price is None and cart_price is None:
             return None
 
         image_url: str | None = None
@@ -404,6 +476,8 @@ class TrendyolScraper(BaseScraper):
             image_url=image_url,
             current_price=current_price,
             original_price=original_price,
+            cart_price=cart_price,
+            promo_badge=promo_badge,
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,
@@ -462,13 +536,15 @@ class TrendyolScraper(BaseScraper):
                         continue
                     if not self._matches_brand_and_section(raw_prod):
                         continue
-                    cur_p, orig_p = self._extract_prices(raw_prod.get("price") or {})
+                    cur_p, orig_p, cart_p, _ = self._extract_prices_and_promo(raw_prod)
                     if cur_p is None:
                         continue
-                    if self.only_discounted and orig_p is None:
+                    if self.only_discounted and orig_p is None and cart_p is None:
                         continue
 
-                    disc_ratio = float((orig_p - cur_p) / orig_p) if orig_p and orig_p > cur_p else 0.0
+                    eff_p = cart_p if (cart_p is not None and cart_p < cur_p) else cur_p
+                    ref_orig = orig_p if (orig_p is not None and orig_p > eff_p) else cur_p
+                    disc_ratio = float((ref_orig - eff_p) / ref_orig) if ref_orig > eff_p else 0.0
                     seen_ids.add(pid)
                     candidates.append((raw_prod, path, disc_ratio))
 

@@ -22,10 +22,12 @@ from ..base import (
 from ...core.filters import turkish_lower
 from ...core.http import (
     HttpClient,
+    clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
     is_kids_product,
     parse_try_price,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,10 @@ _OLD_PRICE_RE = re.compile(
 )
 _SKU_RE = re.compile(r'data-product-sku=["\']([^"\']+)["\']', re.IGNORECASE)
 _PID_RE = re.compile(r'data-product-id=["\'](\d+)["\']', re.IGNORECASE)
+_PROMO_BADGE_RE = re.compile(
+    r'class=["\'][^"\']*(?:promo|badge|campaign|sepet)[^"\']*["\'][^>]*>(.*?)</',
+    re.DOTALL | re.IGNORECASE,
+)
 
 PUMA_OUTLET_PATHS: dict[str, tuple[str, ...]] = {
     "all": ("/outlet/erkek.html", "/outlet/kadin.html", "/outlet.html"),
@@ -68,6 +74,8 @@ class _PumaListingCard:
     current_price: Decimal
     original_price: Decimal | None
     category_path: str
+    cart_price: Decimal | None = None
+    promo_badge: str | None = None
 
 
 def _extract_balanced_json_object(text: str, start_brace_idx: int) -> dict[str, Any] | None:
@@ -252,6 +260,14 @@ class PumaOutletScraper(BaseScraper):
             elif isinstance(ld_img, list) and ld_img and isinstance(ld_img[0], str):
                 image_url = ld_img[0]
 
+            badge_text: str | None = None
+            for bm in _PROMO_BADGE_RE.finditer(chunk):
+                cand = clean_promo_badge_text(html_lib.unescape(bm.group(1)))
+                if cand and any(kw in turkish_lower(cand) for kw in ("sepet", "ürün", "urun", "al ", "öde", "ek %", "kampanya")):
+                    badge_text = cand
+                    break
+            cart_price, promo_badge = resolve_cart_promo(current_price, promo_badge=badge_text)
+
             external_id = sku or pid or prod_url.rstrip("/").rsplit("/", 1)[-1].replace(".html", "")
             seen_urls.add(prod_url)
             cards.append(
@@ -263,6 +279,8 @@ class PumaOutletScraper(BaseScraper):
                     current_price=current_price,
                     original_price=original_price,
                     category_path=category_path,
+                    cart_price=cart_price,
+                    promo_badge=promo_badge,
                 )
             )
 
@@ -347,7 +365,7 @@ class PumaOutletScraper(BaseScraper):
                         continue
                     if not self._matches_section(card.title, card.url, path):
                         continue
-                    if self.only_discounted and card.original_price is None:
+                    if self.only_discounted and card.original_price is None and card.cart_price is None:
                         continue
                     seen_urls.add(card.url)
                     seen_ids.add(card.external_id)
@@ -416,6 +434,8 @@ class PumaOutletScraper(BaseScraper):
                     image_url=card.image_url,
                     current_price=card.current_price,
                     original_price=card.original_price,
+                    cart_price=card.cart_price,
+                    promo_badge=card.promo_badge,
                     currency="TRY",
                     available_sizes=available_sizes,
                     is_critical_stock=is_critical_stock,

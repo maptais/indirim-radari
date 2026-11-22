@@ -330,6 +330,8 @@ def _print_brand_report(
         print("  --- Eşleşen Ürünler (ilk 15) ---")
         for product, f_res, p_res, ai_score, ai_comment in matched_entries[:15]:
             orig = f"{product.original_price} TL" if product.original_price else "-"
+            cart_tag = f" | Sepette: {product.cart_price} TL" if product.cart_price is not None else ""
+            promo_tag = f" [{product.promo_badge}]" if product.promo_badge else ""
             stock_tag = " [KRİTİK STOK]" if product.is_critical_stock else ""
             real_tag = "GERÇEK İNDİRİM" if p_res.is_real_discount else f"ŞÜPHELİ ({p_res.reason})"
             days_tag = (
@@ -343,8 +345,8 @@ def _print_brand_report(
                 comment_suffix = f" — {ai_comment}" if ai_comment else ""
                 ai_line = f"\n    AI Tarz: {ai_score}/10{comment_suffix}"
             print(
-                f"  • [{product.category.value} | {product.gender.value}] {product.title}\n"
-                f"    Fiyat: {product.current_price} TL (Eski: {orig}, %{product.discount_percent}) | "
+                f"  • [{product.category.value} | {product.gender.value}] {product.title}{promo_tag}\n"
+                f"    Fiyat: {product.current_price} TL{cart_tag} (Eski: {orig}, %{product.discount_percent}) | "
                 f"{real_tag}{days_tag}\n"
                 f"    Eşleşen bedenler: {', '.join(f_res.matched_sizes)} "
                 f"(Tüm stok: {', '.join(product.available_sizes)}){stock_tag}\n"
@@ -659,7 +661,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     if analysis.should_record_history:
                         db.record_price_history(
                             product_id=str(saved_row["id"]),
-                            price=product.current_price,
+                            price=product.effective_price,
                             original_price=product.original_price,
                             discount_percent=product.discount_percent,
                         )

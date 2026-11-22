@@ -8,7 +8,9 @@ import {
   ExternalLink,
   Flame,
   ShoppingBag,
+  ShoppingCart,
   Sparkles,
+  Tag,
   TrendingDown,
 } from "lucide-react";
 
@@ -31,9 +33,31 @@ export function ProductCard({ product }: ProductCardProps) {
   const brandLabel = getBrandLabel(product.brand);
   const categoryLabel = getCategoryLabel(product.category);
   const genderLabel = getGenderLabel(product.gender);
-  const hasOriginalPrice =
-    product.original_price !== null &&
-    product.original_price > product.current_price;
+  const hasCartPrice =
+    product.cart_price !== null &&
+    product.cart_price > 0 &&
+    product.cart_price < product.current_price;
+  const effectivePrice =
+    hasCartPrice && product.cart_price !== null
+      ? product.cart_price
+      : product.current_price;
+  const refOriginalPrice =
+    product.original_price !== null && product.original_price > effectivePrice
+      ? product.original_price
+      : hasCartPrice
+        ? product.current_price
+        : null;
+  const hasOriginalPrice = refOriginalPrice !== null && refOriginalPrice > effectivePrice;
+  const effectiveDiscountPercent =
+    hasOriginalPrice && refOriginalPrice !== null
+      ? Math.min(
+          100,
+          Math.max(
+            0,
+            Math.round(((refOriginalPrice - effectivePrice) / refOriginalPrice) * 100)
+          )
+        )
+      : product.discount_percent;
 
   const hasLowestDays =
     product.is_real_discount &&
@@ -68,9 +92,9 @@ export function ProductCard({ product }: ProductCardProps) {
 
         {/* Top-left: Discount Badge */}
         <div className="absolute top-3 left-3 flex flex-wrap items-center gap-1.5">
-          {product.discount_percent > 0 && (
+          {effectiveDiscountPercent > 0 && (
             <span className="inline-flex items-center rounded-full bg-emerald-500 px-2.5 py-1 text-xs font-bold tracking-tight text-zinc-950 shadow-md shadow-emerald-950/50">
-              -%{product.discount_percent}
+              -%{effectiveDiscountPercent}
             </span>
           )}
           {product.is_critical_stock && (
@@ -155,17 +179,57 @@ export function ProductCard({ product }: ProductCardProps) {
           {product.title}
         </h3>
 
-        {/* Prices */}
-        <div className="flex items-baseline gap-2.5">
-          <span className="text-xl font-bold tracking-tight text-white">
-            {formatPriceTry(product.current_price)}
-          </span>
-          {hasOriginalPrice && (
-            <span className="text-sm text-zinc-500 line-through">
-              {formatPriceTry(product.original_price)}
+        {/* Promo Badge */}
+        {product.promo_badge && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-200">
+              <Tag className="h-3 w-3 shrink-0 text-amber-300" />
+              <span>{product.promo_badge}</span>
             </span>
-          )}
-        </div>
+          </div>
+        )}
+
+        {/* Prices */}
+        {hasCartPrice && product.cart_price !== null ? (
+          <div className="space-y-1.5">
+            <div className="inline-flex flex-wrap items-center gap-2 rounded-2xl border border-emerald-500/35 bg-emerald-500/12 px-3 py-1.5">
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold tracking-wide text-emerald-300 uppercase">
+                <ShoppingCart className="h-3.5 w-3.5" />
+                Sepette:
+              </span>
+              <span className="text-xl font-bold tracking-tight text-emerald-300">
+                {formatPriceTry(product.cart_price)}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-baseline gap-2 text-xs">
+              {product.original_price !== null &&
+                product.original_price > product.current_price && (
+                  <span className="text-zinc-500 line-through">
+                    {formatPriceTry(product.original_price)}
+                  </span>
+                )}
+              <span className="text-zinc-400 line-through">
+                {formatPriceTry(product.current_price)}
+              </span>
+              {effectiveDiscountPercent > 0 && (
+                <span className="font-semibold text-emerald-400">
+                  Toplam -%{effectiveDiscountPercent}
+                </span>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-baseline gap-2.5">
+            <span className="text-xl font-bold tracking-tight text-white">
+              {formatPriceTry(product.current_price)}
+            </span>
+            {hasOriginalPrice && (
+              <span className="text-sm text-zinc-500 line-through">
+                {formatPriceTry(refOriginalPrice)}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Available Sizes */}
         {product.available_sizes.length > 0 && (

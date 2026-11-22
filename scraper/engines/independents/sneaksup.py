@@ -20,10 +20,12 @@ from ..base import (
 from ...core.filters import turkish_lower
 from ...core.http import (
     HttpClient,
+    clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
     is_kids_product,
     parse_try_price,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,21 +188,50 @@ class SneaksUpScraper(BaseScraper):
         special_price = parse_try_price(price_obj.get("specialPrice"))
         old_price = parse_try_price(price_obj.get("oldPrice"))
 
-        if special_price is not None and (new_price is None or special_price < new_price):
-            current_price = special_price
-        else:
-            current_price = new_price
-
+        current_price = new_price or special_price
         if current_price is None:
             return None
 
         original_price: Decimal | None = None
         if old_price is not None and old_price > current_price:
             original_price = old_price
-        elif new_price is not None and new_price > current_price:
-            original_price = new_price
 
-        if self.only_discounted and original_price is None:
+        explicit_cart: Decimal | None = None
+        if special_price is not None and new_price is not None and special_price < new_price:
+            explicit_cart = special_price
+
+        badge_candidates: list[str] = []
+        for key in ("ribbonText", "campaignText", "promoBadge", "specialPriceLabel"):
+            txt = clean_promo_badge_text(str(raw.get(key) or price_obj.get(key) or ""))
+            if txt:
+                badge_candidates.append(txt)
+        for badge_key in ("badges", "campaigns", "productTags"):
+            for entry in raw.get(badge_key) or []:
+                raw_txt = (
+                    str(entry.get("text") or entry.get("name") or entry.get("title") or entry.get("label") or "")
+                    if isinstance(entry, dict)
+                    else str(entry or "")
+                )
+                txt = clean_promo_badge_text(raw_txt)
+                if txt and any(
+                    kw in turkish_lower(txt)
+                    for kw in ("sepet", "%", "indirim", "ürün", "urun", "al ", "öde", "ode", "kampanya", "özel")
+                ):
+                    badge_candidates.append(txt)
+
+        chosen_badge = badge_candidates[0] if badge_candidates else None
+        for cand in badge_candidates:
+            if "sepet" in turkish_lower(cand) or "%" in cand:
+                chosen_badge = cand
+                break
+
+        cart_price, promo_badge = resolve_cart_promo(
+            current_price,
+            explicit_cart_price=explicit_cart,
+            promo_badge=chosen_badge,
+        )
+
+        if self.only_discounted and original_price is None and cart_price is None:
             return None
 
         available_sizes: list[str] = []
@@ -264,6 +295,8 @@ class SneaksUpScraper(BaseScraper):
             image_url=image_url,
             current_price=current_price,
             original_price=original_price,
+            cart_price=cart_price,
+            promo_badge=promo_badge,
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,

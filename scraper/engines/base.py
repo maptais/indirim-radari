@@ -66,6 +66,8 @@ class ProductItem(BaseModel):
     image_url: str | None = Field(default=None)
     current_price: Decimal = Field(..., ge=Decimal("0"))
     original_price: Decimal | None = Field(default=None, ge=Decimal("0"))
+    cart_price: Decimal | None = Field(default=None, ge=Decimal("0"))
+    promo_badge: str | None = Field(default=None)
     discount_percent: int | None = Field(default=None, ge=0, le=100)
     currency: str = Field(default="TRY", min_length=3, max_length=3)
     available_sizes: list[str] = Field(default_factory=list)
@@ -92,12 +94,22 @@ class ProductItem(BaseModel):
     def normalize_currency(cls, value: str) -> str:
         return value.strip().upper()
 
-    @field_validator("current_price", "original_price")
+    @field_validator("current_price", "original_price", "cart_price")
     @classmethod
     def quantize_price(cls, value: Decimal | None) -> Decimal | None:
         if value is None:
             return None
         return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    @field_validator("promo_badge")
+    @classmethod
+    def clean_promo_badge(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split()).strip()
+        if not cleaned:
+            return None
+        return cleaned[:120]
 
     @field_validator("available_sizes")
     @classmethod
@@ -111,15 +123,38 @@ class ProductItem(BaseModel):
                 cleaned.append(normalized)
         return cleaned
 
+    @property
+    def effective_price(self) -> Decimal:
+        """Return `cart_price` when a lower single-item cart price exists, else `current_price`."""
+        if (
+            self.cart_price is not None
+            and self.cart_price > Decimal("0")
+            and self.cart_price < self.current_price
+        ):
+            return self.cart_price
+        return self.current_price
+
     @model_validator(mode="after")
     def compute_discount_percent(self) -> ProductItem:
+        if self.cart_price is not None and (
+            self.cart_price <= Decimal("0") or self.cart_price >= self.current_price
+        ):
+            self.cart_price = None
+
         if self.discount_percent is None:
+            eff_price = self.effective_price
+            ref_original: Decimal | None = None
             if (
                 self.original_price is not None
                 and self.original_price > Decimal("0")
-                and self.original_price > self.current_price
+                and self.original_price > eff_price
             ):
-                ratio = (self.original_price - self.current_price) / self.original_price
+                ref_original = self.original_price
+            elif eff_price < self.current_price and self.current_price > Decimal("0"):
+                ref_original = self.current_price
+
+            if ref_original is not None and ref_original > eff_price:
+                ratio = (ref_original - eff_price) / ref_original
                 computed = int((ratio * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
                 self.discount_percent = max(0, min(100, computed))
             else:
@@ -146,6 +181,8 @@ class ProductItem(BaseModel):
             "image_url": self.image_url,
             "current_price": float(self.current_price),
             "original_price": float(self.original_price) if self.original_price is not None else None,
+            "cart_price": float(self.cart_price) if self.cart_price is not None else None,
+            "promo_badge": self.promo_badge,
             "discount_percent": self.discount_percent or 0,
             "currency": self.currency,
             "available_sizes": self.available_sizes,

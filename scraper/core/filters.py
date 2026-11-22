@@ -220,13 +220,14 @@ class ProductFilter:
         if self._target_genders and product.gender.value not in self._target_genders:
             reasons.append(f"gender_mismatch:{product.gender.value}")
 
-        # 1. Price validity & category thresholds
+        # 1. Price validity & category thresholds (use effective cart_price when available)
         threshold = self.user_settings.get_threshold(product.category.value)
-        if product.current_price <= Decimal("0"):
+        effective_price = product.effective_price
+        if effective_price <= Decimal("0"):
             reasons.append("invalid_price")
-        elif product.current_price > threshold.max_price_try:
+        elif effective_price > threshold.max_price_try:
             reasons.append(
-                f"price_above_max:{product.current_price}>{threshold.max_price_try}"
+                f"price_above_max:{effective_price}>{threshold.max_price_try}"
             )
 
         discount = product.discount_percent or 0

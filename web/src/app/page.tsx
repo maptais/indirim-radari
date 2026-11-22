@@ -42,6 +42,7 @@ async function loadInitialProducts(): Promise<{
       totalActive: 0,
       realDiscountCount: 0,
       criticalStockCount: 0,
+      cartPromoCount: 0,
       latestScrapedAt: null,
     },
   };
@@ -83,44 +84,64 @@ async function loadInitialProducts(): Promise<{
     const targetGenders = normalizeTargetGenders(userSettingsRow?.target_genders);
     const allowedGenders = new Set<ProductGender>(targetGenders);
 
-    const allProducts: ProductRow[] = (rawProducts || []).map((row) => ({
-      ...(row as ProductRow),
-      gender: normalizeGender(row.gender),
-      current_price: Number(row.current_price ?? 0),
-      original_price:
-        row.original_price !== null && row.original_price !== undefined
-          ? Number(row.original_price)
-          : null,
-      discount_percent: Number(row.discount_percent ?? 0),
-      available_sizes: Array.isArray(row.available_sizes)
-        ? row.available_sizes
-        : [],
-      lowest_price_days:
-        row.lowest_price_days !== null && row.lowest_price_days !== undefined
-          ? Number(row.lowest_price_days)
-          : null,
-      historical_min_price:
-        row.historical_min_price !== null &&
-        row.historical_min_price !== undefined
-          ? Number(row.historical_min_price)
-          : null,
-      ai_score:
-        row.ai_score !== null && row.ai_score !== undefined
-          ? Number(row.ai_score)
-          : null,
-    }));
+    const allProducts: ProductRow[] = (rawProducts || []).map((row) => {
+      const currentPrice = Number(row.current_price ?? 0);
+      const rawCart =
+        row.cart_price !== null && row.cart_price !== undefined
+          ? Number(row.cart_price)
+          : null;
+      const cartPrice =
+        rawCart !== null && Number.isFinite(rawCart) && rawCart > 0 && rawCart < currentPrice
+          ? rawCart
+          : null;
+      const promoBadge =
+        typeof row.promo_badge === "string" && row.promo_badge.trim()
+          ? row.promo_badge.trim()
+          : null;
+
+      return {
+        ...(row as ProductRow),
+        gender: normalizeGender(row.gender),
+        current_price: currentPrice,
+        original_price:
+          row.original_price !== null && row.original_price !== undefined
+            ? Number(row.original_price)
+            : null,
+        cart_price: cartPrice,
+        promo_badge: promoBadge,
+        discount_percent: Number(row.discount_percent ?? 0),
+        available_sizes: Array.isArray(row.available_sizes)
+          ? row.available_sizes
+          : [],
+        lowest_price_days:
+          row.lowest_price_days !== null && row.lowest_price_days !== undefined
+            ? Number(row.lowest_price_days)
+            : null,
+        historical_min_price:
+          row.historical_min_price !== null &&
+          row.historical_min_price !== undefined
+            ? Number(row.historical_min_price)
+            : null,
+        ai_score:
+          row.ai_score !== null && row.ai_score !== undefined
+            ? Number(row.ai_score)
+            : null,
+      };
+    });
 
     const products = allProducts.filter((item) => allowedGenders.has(item.gender));
 
     const brandsSet = new Set<string>();
     let realDiscountCount = 0;
     let criticalStockCount = 0;
+    let cartPromoCount = 0;
     let latestProductSeen: string | null = null;
 
     for (const item of products) {
       if (item.brand) brandsSet.add(item.brand);
       if (item.is_real_discount) realDiscountCount += 1;
       if (item.is_critical_stock) criticalStockCount += 1;
+      if (item.cart_price !== null || item.promo_badge) cartPromoCount += 1;
       if (
         item.last_seen_at &&
         (!latestProductSeen || item.last_seen_at > latestProductSeen)
@@ -144,6 +165,7 @@ async function loadInitialProducts(): Promise<{
           totalActive: products.length,
           realDiscountCount,
           criticalStockCount,
+          cartPromoCount,
           latestScrapedAt,
         },
       },

@@ -20,10 +20,12 @@ from ..base import (
 from ...core.filters import extract_polyester_percent, turkish_lower
 from ...core.http import (
     HttpClient,
+    clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
     is_kids_product,
     parse_try_price,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -275,6 +277,60 @@ class JackJonesScraper(BaseScraper):
             return gender == ProductGender.WOMEN
         return True
 
+    @staticmethod
+    def _extract_cart_promo(
+        raw: dict[str, Any],
+        current_price: Decimal | None,
+    ) -> tuple[Decimal | None, str | None]:
+        price_obj = raw.get("price") or {}
+        explicit_cart: Decimal | None = None
+        badge_candidates: list[str] = []
+
+        if isinstance(price_obj, dict):
+            for key in ("basketPrice", "cartPrice", "campaignPrice"):
+                val = price_obj.get(key)
+                cand = parse_try_price(val.get("amount") if isinstance(val, dict) else val)
+                if cand is not None and current_price is not None and cand < current_price:
+                    explicit_cart = cand
+                    break
+
+            for disc in price_obj.get("discounts") or []:
+                if not isinstance(disc, dict):
+                    continue
+                pname = clean_promo_badge_text(str(disc.get("promotionName") or ""))
+                if pname:
+                    badge_candidates.append(pname)
+
+        for key in ("campaignText", "promoBadge", "badgeText"):
+            txt = clean_promo_badge_text(str(raw.get(key) or ""))
+            if txt:
+                badge_candidates.append(txt)
+        for list_key in ("badges", "promotionalBadges", "campaigns"):
+            for entry in raw.get(list_key) or []:
+                raw_txt = (
+                    str(entry.get("text") or entry.get("label") or entry.get("name") or "")
+                    if isinstance(entry, dict)
+                    else str(entry or "")
+                )
+                txt = clean_promo_badge_text(raw_txt)
+                if txt and any(
+                    kw in turkish_lower(txt)
+                    for kw in ("sepet", "%", "indirim", "ürün", "urun", "al ", "öde", "ode", "kampanya")
+                ):
+                    badge_candidates.append(txt)
+
+        chosen_badge = badge_candidates[0] if badge_candidates else None
+        for cand in badge_candidates:
+            if "sepet" in turkish_lower(cand) or "%" in cand:
+                chosen_badge = cand
+                break
+
+        return resolve_cart_promo(
+            current_price,
+            explicit_cart_price=explicit_cart,
+            promo_badge=chosen_badge,
+        )
+
     def parse_listing_product(
         self,
         raw: dict[str, Any],
@@ -298,7 +354,8 @@ class JackJonesScraper(BaseScraper):
         current_price, original_price = self._extract_prices(raw.get("price") or {})
         if current_price is None:
             return None
-        if self.only_discounted and original_price is None:
+        cart_price, promo_badge = self._extract_cart_promo(raw, current_price)
+        if self.only_discounted and original_price is None and cart_price is None:
             return None
 
         image_url: str | None = None
@@ -362,6 +419,8 @@ class JackJonesScraper(BaseScraper):
             image_url=image_url,
             current_price=current_price,
             original_price=original_price,
+            cart_price=cart_price,
+            promo_badge=promo_badge,
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,
@@ -419,10 +478,13 @@ class JackJonesScraper(BaseScraper):
                     cur_p, orig_p = self._extract_prices(raw_prod.get("price") or {})
                     if cur_p is None:
                         continue
-                    if self.only_discounted and orig_p is None:
+                    cart_p, _ = self._extract_cart_promo(raw_prod, cur_p)
+                    if self.only_discounted and orig_p is None and cart_p is None:
                         continue
 
-                    disc_ratio = float((orig_p - cur_p) / orig_p) if orig_p and orig_p > cur_p else 0.0
+                    eff_p = cart_p if (cart_p is not None and cart_p < cur_p) else cur_p
+                    ref_orig = orig_p if (orig_p is not None and orig_p > eff_p) else cur_p
+                    disc_ratio = float((ref_orig - eff_p) / ref_orig) if ref_orig > eff_p else 0.0
                     seen_ids.add(pid)
                     candidates.append((raw_prod, path, disc_ratio))
                     found_discounted_on_page += 1

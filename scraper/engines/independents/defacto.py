@@ -20,10 +20,12 @@ from ..base import (
 from ...core.filters import turkish_lower
 from ...core.http import (
     HttpClient,
+    clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
     is_kids_product,
     parse_try_price,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -168,15 +170,47 @@ class DeFactoScraper(BaseScraper):
         discounted_price = parse_try_price(doc.get("DiscountedPrice"))
         campaign_price = parse_try_price(doc.get("CampaignDiscountedPrice"))
 
-        price_candidates = [p for p in (campaign_price, discounted_price, list_price) if p is not None]
-        if not price_candidates:
+        badge_obj = doc.get("CampaignBadge")
+        badge_text: str | None = None
+        if isinstance(badge_obj, dict):
+            if campaign_price is None:
+                campaign_price = parse_try_price(badge_obj.get("DiscountPrice"))
+            desc = clean_promo_badge_text(str(badge_obj.get("DiscountBadgeDescription") or badge_obj.get("CampaignDescription") or ""))
+            disc_amt = badge_obj.get("DiscountAmount")
+            if desc and isinstance(disc_amt, (int, float)) and 0 < int(disc_amt) < 100:
+                if "%" in desc:
+                    badge_text = desc
+                else:
+                    badge_text = f"{desc} %{int(disc_amt)} İndirim"
+            elif desc:
+                badge_text = desc
+
+        if not badge_text:
+            for key in ("CampaignBadgeText", "CampaignText", "CampaignName", "BadgeText"):
+                cand = clean_promo_badge_text(str(doc.get(key) or ""))
+                if cand:
+                    badge_text = cand
+                    break
+
+        # Storefront selling price (before cart/campaign discount)
+        base_candidates = [p for p in (discounted_price, list_price) if p is not None]
+        if base_candidates:
+            current_price = min(base_candidates)
+            max_base = max(base_candidates)
+            original_price: Decimal | None = max_base if max_base > current_price else None
+        elif campaign_price is not None:
+            current_price = campaign_price
+            original_price = None
+        else:
             return None
 
-        current_price = min(price_candidates)
-        max_price = max(price_candidates)
-        original_price: Decimal | None = max_price if max_price > current_price else None
+        cart_price, promo_badge = resolve_cart_promo(
+            current_price,
+            explicit_cart_price=campaign_price if (campaign_price is not None and campaign_price < current_price) else None,
+            promo_badge=badge_text,
+        )
 
-        if self.only_discounted and original_price is None:
+        if self.only_discounted and original_price is None and cart_price is None:
             return None
 
         available_sizes: list[str] = []
@@ -251,6 +285,8 @@ class DeFactoScraper(BaseScraper):
             image_url=image_url,
             current_price=current_price,
             original_price=original_price,
+            cart_price=cart_price,
+            promo_badge=promo_badge,
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,

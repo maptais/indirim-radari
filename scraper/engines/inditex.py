@@ -23,10 +23,12 @@ from .base import (
 from ..core.filters import extract_polyester_percent, turkish_lower
 from ..core.http import (
     IMPERSONATE_PROFILES,
+    clean_promo_badge_text,
     get_safe_ca_bundle,
     infer_product_gender,
     is_blocked_body,
     is_kids_product,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -1239,6 +1241,14 @@ class InditexScraper(BaseScraper):
             default=ProductGender.UNISEX,
         )
 
+        raw_promo = clean_promo_badge_text(
+            str(comp.get("discountLabel") or comp.get("promotionalText") or "")
+        )
+        # Skip plain "-40%" discount badges that duplicate the main discount pill
+        if raw_promo and re.fullmatch(r"[-+]?\s*%?\s*\d{1,2}\s*%?", raw_promo):
+            raw_promo = None
+        cart_price, promo_badge = resolve_cart_promo(current_price, promo_badge=raw_promo)
+
         return ProductItem(
             brand=self.brand,
             external_id=str(prod_id),
@@ -1249,6 +1259,8 @@ class InditexScraper(BaseScraper):
             image_url=image_url,
             current_price=current_price,
             original_price=original_price,
+            cart_price=cart_price,
+            promo_badge=promo_badge,
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,

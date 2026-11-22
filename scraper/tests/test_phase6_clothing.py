@@ -245,9 +245,11 @@ class TestPhase6ClothingScrapers(unittest.TestCase):
         assert item is not None
         self.assertEqual(item.brand, "defacto")
         self.assertEqual(item.category, ProductCategory.TOPS)
-        self.assertEqual(item.current_price, Decimal("753.99"))
-        self.assertEqual(item.original_price, Decimal("1299.99"))
+        self.assertEqual(item.current_price, Decimal("1299.99"))
+        self.assertEqual(item.cart_price, Decimal("753.99"))
+        self.assertEqual(item.effective_price, Decimal("753.99"))
         self.assertEqual(item.discount_percent, 42)
+        self.assertEqual(item.promo_badge, "Sepette %42 İndirim")
         self.assertEqual(item.available_sizes, ["M", "L"])
         self.assertTrue(item.is_critical_stock)
         self.assertTrue(self.product_filter.evaluate(item).passed)

@@ -7,6 +7,7 @@ import {
   Radar,
   RefreshCw,
   Search,
+  ShoppingCart,
   SlidersHorizontal,
   X,
 } from "lucide-react";
@@ -59,6 +60,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
     ProductCategory | "all"
   >("all");
   const [realOnly, setRealOnly] = useState<boolean>(false);
+  const [cartOnly, setCartOnly] = useState<boolean>(false);
   const [sortBy, setSortBy] = useState<SortKey>("discount");
   const [searchQuery, setSearchQuery] = useState<string>("");
 
@@ -72,6 +74,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
       brand: string;
       category: string;
       realOnly: boolean;
+      cartOnly: boolean;
       sort: SortKey;
       q: string;
     }) => {
@@ -83,6 +86,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
         if (params.brand !== "all") sp.set("brand", params.brand);
         if (params.category !== "all") sp.set("category", params.category);
         if (params.realOnly) sp.set("realOnly", "true");
+        if (params.cartOnly) sp.set("cartOnly", "true");
         if (params.sort) sp.set("sort", params.sort);
         if (params.q.trim()) sp.set("q", params.q.trim());
 
@@ -125,6 +129,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
         brand: selectedBrand,
         category: selectedCategory,
         realOnly,
+        cartOnly,
         sort: sortBy,
         q: searchQuery,
       });
@@ -136,6 +141,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
     selectedBrand,
     selectedCategory,
     realOnly,
+    cartOnly,
     sortBy,
     searchQuery,
     fetchProducts,
@@ -147,8 +153,16 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
       selectedBrand !== "all" ||
       selectedCategory !== "all" ||
       realOnly ||
+      cartOnly ||
       searchQuery.trim().length > 0,
-    [selectedGender, selectedBrand, selectedCategory, realOnly, searchQuery]
+    [
+      selectedGender,
+      selectedBrand,
+      selectedCategory,
+      realOnly,
+      cartOnly,
+      searchQuery,
+    ]
   );
 
   const resetFilters = () => {
@@ -156,6 +170,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
     setSelectedBrand("all");
     setSelectedCategory("all");
     setRealOnly(false);
+    setCartOnly(false);
     setSearchQuery("");
     setSortBy("discount");
   };
@@ -193,6 +208,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
                   brand: selectedBrand,
                   category: selectedCategory,
                   realOnly,
+                  cartOnly,
                   sort: sortBy,
                   q: searchQuery,
                 })
@@ -270,7 +286,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
               )}
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 role="switch"
@@ -283,7 +299,25 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
                 }`}
               >
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                <span>Sadece Gerçek İndirimler</span>
+                <span>Gerçek İndirim</span>
+              </button>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={cartOnly}
+                onClick={() => setCartOnly((prev) => !prev)}
+                className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-2xl border px-3.5 text-xs font-semibold transition ${
+                  cartOnly
+                    ? "border-amber-400/50 bg-amber-400/15 text-amber-200"
+                    : "border-white/10 bg-zinc-950/70 text-zinc-300 hover:bg-zinc-900"
+                }`}
+              >
+                <ShoppingCart className="h-3.5 w-3.5" />
+                <span>
+                  Sepette İndirimliler
+                  {stats.cartPromoCount > 0 ? ` (${stats.cartPromoCount})` : ""}
+                </span>
               </button>
 
               <div className="relative flex-1 sm:flex-none">

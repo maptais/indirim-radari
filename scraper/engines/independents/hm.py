@@ -15,12 +15,15 @@ from ..base import (
     ScrapeRunMode,
     ScraperBlockedError,
 )
+from ...core.filters import turkish_lower
 from ...core.http import (
     HttpClient,
+    clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
     is_kids_product,
     parse_try_price,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,7 +226,30 @@ class HMScraper(BaseScraper):
 
         if current_price is None:
             return None
-        if self.only_discounted and original_price is None:
+
+        # Extract H&M campaign/marker badges (e.g. "Sepette %20", "2. Ürüne %50", member deal)
+        badge_candidates: list[str] = []
+        for key in ("promotionalMarkerText", "marketingMarkerText", "clubPriceLabel"):
+            txt = clean_promo_badge_text(str(raw.get(key) or ""))
+            if txt:
+                badge_candidates.append(txt)
+        for marker in raw.get("markers") or []:
+            if isinstance(marker, dict):
+                txt = clean_promo_badge_text(str(marker.get("text") or marker.get("label") or ""))
+                if txt and any(kw in turkish_lower(txt) for kw in ("sepet", "%", "indirim", "ürün", "urun", "al ", "öde", "fırsat", "üye")):
+                    badge_candidates.append(txt)
+        for attr in raw.get("sellingAttributes") or []:
+            txt = clean_promo_badge_text(str(attr or ""))
+            if txt and any(kw in turkish_lower(txt) for kw in ("sepet", "%", "indirim", "ürün", "urun", "al ", "öde", "fırsat")):
+                badge_candidates.append(txt)
+
+        chosen_badge = badge_candidates[0] if badge_candidates else None
+        cart_price, promo_badge = resolve_cart_promo(
+            current_price,
+            promo_badge=chosen_badge,
+        )
+
+        if self.only_discounted and original_price is None and cart_price is None:
             return None
 
         available_sizes, is_critical_stock = self._extract_sizes(raw)
@@ -259,6 +285,8 @@ class HMScraper(BaseScraper):
             image_url=image_url,
             current_price=current_price,
             original_price=original_price,
+            cart_price=cart_price,
+            promo_badge=promo_badge,
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,

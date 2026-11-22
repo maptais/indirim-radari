@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS public.products (
     image_url           TEXT,
     current_price       NUMERIC(10, 2) NOT NULL CHECK (current_price >= 0),
     original_price      NUMERIC(10, 2) CHECK (original_price IS NULL OR original_price >= 0),
+    cart_price          NUMERIC(10, 2) CHECK (cart_price IS NULL OR cart_price >= 0),
+    promo_badge         TEXT,
     discount_percent    SMALLINT NOT NULL DEFAULT 0 CHECK (discount_percent BETWEEN 0 AND 100),
     currency            TEXT NOT NULL DEFAULT 'TRY',
     available_sizes     TEXT[] NOT NULL DEFAULT '{}',
@@ -64,6 +66,10 @@ CREATE INDEX IF NOT EXISTS idx_products_brand_category
 
 CREATE INDEX IF NOT EXISTS idx_products_active_gender
     ON public.products (is_active, gender, discount_percent DESC);
+
+CREATE INDEX IF NOT EXISTS idx_products_cart_promo
+    ON public.products (is_active, discount_percent DESC)
+    WHERE cart_price IS NOT NULL OR promo_badge IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_products_active_last_seen
     ON public.products (is_active, last_seen_at DESC);

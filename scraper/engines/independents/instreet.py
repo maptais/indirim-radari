@@ -18,10 +18,12 @@ from ..base import (
 from ...core.filters import turkish_lower
 from ...core.http import (
     HttpClient,
+    clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
     is_kids_product,
     parse_try_price,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,55 @@ class InStreetScraper(BaseScraper):
             return gender == ProductGender.WOMEN
         return True
 
+    @staticmethod
+    def _extract_cart_promo(
+        raw: dict[str, Any],
+        current_price: Decimal | None,
+    ) -> tuple[Decimal | None, str | None]:
+        explicit_cart: Decimal | None = None
+        for key in ("thirdPrice", "basketPrice", "cartPrice", "campaignPrice", "specialPrice", "discountedPrice"):
+            cand = parse_try_price(raw.get(key))
+            if cand is not None and current_price is not None and cand < current_price:
+                explicit_cart = cand
+                break
+
+        badge_candidates: list[str] = []
+        for key in ("thirdPriceLabel", "campaignText", "campaignName", "promotionText", "promoBadge"):
+            txt = clean_promo_badge_text(str(raw.get(key) or ""))
+            if txt:
+                badge_candidates.append(txt)
+
+        # Inspect animatedBadgeList / badges, filtering out non-promo tags like "Kargo Bedava" / "Yeni Sezon"
+        for badge_list_key in ("animatedBadgeList", "badges", "campaignBadges"):
+            for entry in raw.get(badge_list_key) or []:
+                raw_txt = (
+                    str(entry.get("badgeText") or entry.get("text") or entry.get("title") or "")
+                    if isinstance(entry, dict)
+                    else str(entry or "")
+                )
+                txt = clean_promo_badge_text(raw_txt)
+                if not txt:
+                    continue
+                low = turkish_lower(txt)
+                if any(
+                    kw in low
+                    for kw in ("sepet", "%", "indirim", "ürün", "urun", "al ", "öde", "ode", "fırsat", "firsat", "kampanya")
+                ):
+                    badge_candidates.append(txt)
+
+        chosen_badge = badge_candidates[0] if badge_candidates else None
+        for cand in badge_candidates:
+            low = turkish_lower(cand)
+            if "sepet" in low or "%" in low:
+                chosen_badge = cand
+                break
+
+        return resolve_cart_promo(
+            current_price,
+            explicit_cart_price=explicit_cart,
+            promo_badge=chosen_badge,
+        )
+
     def parse_product(self, raw: dict[str, Any]) -> ProductItem | None:
         """Normalize a single In Street webservice product object into `ProductItem`."""
         if raw.get("isInStock") is False:
@@ -135,7 +186,9 @@ class InStreetScraper(BaseScraper):
         if original_price is not None and original_price <= current_price:
             original_price = None
 
-        if self.only_discounted and original_price is None:
+        cart_price, promo_badge = self._extract_cart_promo(raw, current_price)
+
+        if self.only_discounted and original_price is None and cart_price is None:
             return None
 
         relative_url = str(raw.get("relativeUrl") or "").strip()
@@ -201,6 +254,8 @@ class InStreetScraper(BaseScraper):
             image_url=image_url,
             current_price=current_price,
             original_price=original_price,
+            cart_price=cart_price,
+            promo_badge=promo_badge,
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,

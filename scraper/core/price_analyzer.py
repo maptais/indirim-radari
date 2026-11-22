@@ -96,11 +96,13 @@ class PriceAnalyzer:
 
         # Newest first
         snapshots.sort(key=lambda s: s.recorded_at, reverse=True)
-        current_price = product.current_price
+        current_price = product.effective_price
         discount_pct = product.discount_percent or 0
         has_store_markdown = (
-            product.original_price is not None
-            and product.original_price > current_price
+            (
+                (product.original_price is not None and product.original_price > current_price)
+                or (product.cart_price is not None and product.cart_price < product.current_price)
+            )
             and discount_pct > 0
         )
 

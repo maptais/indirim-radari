@@ -20,10 +20,13 @@ from .base import (
 from ..core.filters import extract_polyester_percent, turkish_lower
 from ..core.http import (
     HttpClient,
+    clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
+    is_conditional_promo,
     is_kids_product,
     parse_try_price,
+    resolve_cart_promo,
 )
 
 logger = logging.getLogger(__name__)
@@ -345,6 +348,93 @@ class AkinonScraper(BaseScraper):
 
         return available_sizes, is_critical_stock, fabric_info, polyester_pct
 
+    @staticmethod
+    def _extract_cart_promo(
+        raw: dict[str, Any],
+        current_price: Decimal | None,
+    ) -> tuple[Decimal | None, str | None]:
+        """Extract Akinon `basket_offers`, explicit basket/cart price, and campaign badge."""
+        explicit_cart: Decimal | None = None
+        badge_candidates: list[str] = []
+
+        # 1. Akinon `basket_offers` (e.g. SuperStep "SEPETTE %40 İNDİRİM", Sportive "Online Özel")
+        basket_offers = raw.get("basket_offers") or []
+        if isinstance(basket_offers, list):
+            for offer in basket_offers:
+                if not isinstance(offer, dict):
+                    continue
+                label = clean_promo_badge_text(str(offer.get("label") or offer.get("name") or ""))
+                if label:
+                    badge_candidates.append(label)
+                lkwargs = offer.get("listing_kwargs") or {}
+                if isinstance(lkwargs, dict):
+                    qty_raw = lkwargs.get("quantity", 1)
+                    try:
+                        qty = int(qty_raw) if qty_raw is not None else 1
+                    except (TypeError, ValueError):
+                        qty = 1
+                    # Only apply single-item cart price (exclude multi-buy offers like quantity >= 2)
+                    if qty == 1 and not is_conditional_promo(label):
+                        cand_price = parse_try_price(
+                            lkwargs.get("discounted_total_price")
+                            or lkwargs.get("discounted_price")
+                            or lkwargs.get("basket_price")
+                        )
+                        if (
+                            cand_price is not None
+                            and current_price is not None
+                            and cand_price < current_price
+                            and (explicit_cart is None or cand_price < explicit_cart)
+                        ):
+                            explicit_cart = cand_price
+
+        # 2. Direct top-level or attribute cart price keys
+        attrs = raw.get("attributes") or {}
+        if explicit_cart is None:
+            for key in ("basket_price", "cart_price", "campaign_price", "discounted_price"):
+                cand = parse_try_price(raw.get(key))
+                if cand is not None and current_price is not None and cand < current_price:
+                    explicit_cart = cand
+                    break
+        if explicit_cart is None and isinstance(attrs, dict):
+            for key in ("integration_sepet_fiyati", "sepet_fiyati", "basket_price", "cart_price"):
+                cand = parse_try_price(attrs.get(key))
+                if cand is not None and current_price is not None and cand < current_price:
+                    explicit_cart = cand
+                    break
+
+        # 3. Additional promo badge text keys from top-level or attributes
+        for key in ("campaign_text", "promo_badge", "badge_text"):
+            txt = clean_promo_badge_text(str(raw.get(key) or ""))
+            if txt:
+                badge_candidates.append(txt)
+        if isinstance(attrs, dict):
+            for key in (
+                "integration_kampanya",
+                "kampanya",
+                "sepet_indirimi",
+                "badge_text",
+                "integration_badge",
+                "emarsys_kampanya",
+            ):
+                txt = clean_promo_badge_text(str(attrs.get(key) or ""))
+                if txt:
+                    badge_candidates.append(txt)
+
+        chosen_badge = badge_candidates[0] if badge_candidates else None
+        # Prefer a badge mentioning "sepet" or "%" over generic labels like "BLACK FRIDAY ÖZEL"
+        for cand in badge_candidates:
+            low = turkish_lower(cand)
+            if "sepet" in low or "%" in low or "ürün" in low or "urun" in low or "al " in low:
+                chosen_badge = cand
+                break
+
+        return resolve_cart_promo(
+            current_price,
+            explicit_cart_price=explicit_cart,
+            promo_badge=chosen_badge,
+        )
+
     def parse_listing_product(
         self,
         raw: dict[str, Any],
@@ -368,7 +458,17 @@ class AkinonScraper(BaseScraper):
         if original_price is not None and original_price <= current_price:
             original_price = None
 
-        if self.only_discounted and original_price is None:
+        cart_price, promo_badge = self._extract_cart_promo(raw, current_price)
+        if detail_payload is not None and cart_price is None:
+            detail_prod = detail_payload.get("product")
+            if isinstance(detail_prod, dict):
+                d_cart, d_badge = self._extract_cart_promo(detail_prod, current_price)
+                if d_cart is not None:
+                    cart_price = d_cart
+                if not promo_badge and d_badge:
+                    promo_badge = d_badge
+
+        if self.only_discounted and original_price is None and cart_price is None:
             return None
 
         attrs = raw.get("attributes") or {}
@@ -435,6 +535,8 @@ class AkinonScraper(BaseScraper):
             image_url=self._extract_image_url(raw),
             current_price=current_price,
             original_price=original_price,
+            cart_price=cart_price,
+            promo_badge=promo_badge,
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,
@@ -497,7 +599,8 @@ class AkinonScraper(BaseScraper):
                     orig_p = parse_try_price(raw_prod.get("retail_price"))
                     if cur_p is None:
                         continue
-                    if self.only_discounted and (orig_p is None or orig_p <= cur_p):
+                    cart_p, _ = self._extract_cart_promo(raw_prod, cur_p)
+                    if self.only_discounted and (orig_p is None or orig_p <= cur_p) and cart_p is None:
                         continue
 
                     seen_urls.add(abs_url)
@@ -521,19 +624,22 @@ class AkinonScraper(BaseScraper):
             len(selected_paths),
         )
 
-        # Prioritize higher discount percentage when detail fetch budget is bounded
+        # Prioritize higher effective discount percentage (including cart_price)
         def _discount_sort_key(entry: tuple[dict[str, Any], str]) -> float:
             raw_p = entry[0]
+            cur = parse_try_price(raw_p.get("price")) or Decimal("1")
+            orig = parse_try_price(raw_p.get("retail_price")) or cur
+            cart_p, _ = self._extract_cart_promo(raw_p, cur)
+            eff = cart_p if (cart_p is not None and cart_p < cur) else cur
+            ref = orig if orig > eff else cur
+            if ref > eff and ref > Decimal("0"):
+                return -float((ref - eff) / ref)
             ratio = raw_p.get("discount_ratio")
             if ratio is not None:
                 try:
                     return -float(ratio)
                 except (TypeError, ValueError):
                     pass
-            cur = parse_try_price(raw_p.get("price")) or Decimal("1")
-            orig = parse_try_price(raw_p.get("retail_price")) or cur
-            if orig > cur and orig > Decimal("0"):
-                return -float((orig - cur) / orig)
             return 0.0
 
         candidates.sort(key=_discount_sort_key)

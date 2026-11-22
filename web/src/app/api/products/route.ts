@@ -40,15 +40,59 @@ function normalizeTargetGenders(raw: unknown): ProductGender[] {
   return result.length > 0 ? result : [...DEFAULT_TARGET_GENDERS];
 }
 
+function getEffectivePrice(item: ProductRow): number {
+  if (
+    item.cart_price !== null &&
+    item.cart_price > 0 &&
+    item.cart_price < item.current_price
+  ) {
+    return item.cart_price;
+  }
+  return item.current_price;
+}
+
+function getEffectiveDiscountPercent(item: ProductRow): number {
+  const effPrice = getEffectivePrice(item);
+  const refOriginal =
+    item.original_price !== null && item.original_price > effPrice
+      ? item.original_price
+      : effPrice < item.current_price
+        ? item.current_price
+        : null;
+  if (refOriginal !== null && refOriginal > effPrice) {
+    return Math.min(
+      100,
+      Math.max(0, Math.round(((refOriginal - effPrice) / refOriginal) * 100))
+    );
+  }
+  return item.discount_percent;
+}
+
 function normalizeNumericProduct(row: Record<string, unknown>): ProductRow {
+  const currentPrice = Number(row.current_price ?? 0);
+  const rawCart =
+    row.cart_price !== null && row.cart_price !== undefined
+      ? Number(row.cart_price)
+      : null;
+  const cartPrice =
+    rawCart !== null && Number.isFinite(rawCart) && rawCart > 0 && rawCart < currentPrice
+      ? rawCart
+      : null;
+  const promoBadge =
+    typeof row.promo_badge === "string" && row.promo_badge.trim()
+      ? row.promo_badge.trim()
+      : null;
+
   return {
     ...(row as unknown as ProductRow),
     gender: normalizeGender(row.gender),
-    current_price: Number(row.current_price ?? 0),
+    current_price: currentPrice,
     original_price:
       row.original_price !== null && row.original_price !== undefined
         ? Number(row.original_price)
         : null,
+    cart_price: cartPrice,
+    promo_badge: promoBadge,
     discount_percent: Number(row.discount_percent ?? 0),
     available_sizes: Array.isArray(row.available_sizes)
       ? (row.available_sizes as string[])
@@ -85,6 +129,7 @@ export async function GET(request: NextRequest) {
     const categoryParam = (searchParams.get("category") || "").trim().toLowerCase();
     const genderParam = (searchParams.get("gender") || "settings").trim().toLowerCase();
     const realOnly = searchParams.get("realOnly") === "true";
+    const cartOnly = searchParams.get("cartOnly") === "true";
     const sortParam = (searchParams.get("sort") || "discount").trim().toLowerCase();
     const queryText = (searchParams.get("q") || "").trim().toLowerCase();
 
@@ -145,12 +190,14 @@ export async function GET(request: NextRequest) {
     const brandsSet = new Set<string>();
     let realDiscountCount = 0;
     let criticalStockCount = 0;
+    let cartPromoCount = 0;
     let latestProductSeen: string | null = null;
 
     for (const item of genderScoped) {
       if (item.brand) brandsSet.add(item.brand);
       if (item.is_real_discount) realDiscountCount += 1;
       if (item.is_critical_stock) criticalStockCount += 1;
+      if (item.cart_price !== null || item.promo_badge) cartPromoCount += 1;
       if (
         item.last_seen_at &&
         (!latestProductSeen || item.last_seen_at > latestProductSeen)
@@ -177,12 +224,19 @@ export async function GET(request: NextRequest) {
       filtered = filtered.filter((item) => item.is_real_discount);
     }
 
+    if (cartOnly) {
+      filtered = filtered.filter(
+        (item) => item.cart_price !== null || Boolean(item.promo_badge)
+      );
+    }
+
     if (queryText) {
       filtered = filtered.filter(
         (item) =>
           item.title.toLowerCase().includes(queryText) ||
           item.brand.toLowerCase().includes(queryText) ||
-          (item.fabric_info || "").toLowerCase().includes(queryText)
+          (item.fabric_info || "").toLowerCase().includes(queryText) ||
+          (item.promo_badge || "").toLowerCase().includes(queryText)
       );
     }
 
@@ -191,22 +245,24 @@ export async function GET(request: NextRequest) {
         case "newest":
           return Date.parse(b.last_seen_at) - Date.parse(a.last_seen_at);
         case "price_asc":
-          return a.current_price - b.current_price;
+          return getEffectivePrice(a) - getEffectivePrice(b);
         case "ai_score": {
           const scoreA = a.ai_score ?? -1;
           const scoreB = b.ai_score ?? -1;
           if (scoreB !== scoreA) return scoreB - scoreA;
-          return b.discount_percent - a.discount_percent;
+          return getEffectiveDiscountPercent(b) - getEffectiveDiscountPercent(a);
         }
         case "discount":
         default: {
-          if (b.discount_percent !== a.discount_percent) {
-            return b.discount_percent - a.discount_percent;
+          const discDiff =
+            getEffectiveDiscountPercent(b) - getEffectiveDiscountPercent(a);
+          if (discDiff !== 0) {
+            return discDiff;
           }
           if (Number(b.is_real_discount) !== Number(a.is_real_discount)) {
             return Number(b.is_real_discount) - Number(a.is_real_discount);
           }
-          return a.current_price - b.current_price;
+          return getEffectivePrice(a) - getEffectivePrice(b);
         }
       }
     });
@@ -225,6 +281,7 @@ export async function GET(request: NextRequest) {
         totalActive: genderScoped.length,
         realDiscountCount,
         criticalStockCount,
+        cartPromoCount,
         latestScrapedAt,
       },
     };

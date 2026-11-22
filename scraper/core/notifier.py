@@ -203,7 +203,7 @@ class PushNotifier:
             last_notified_raw = existing_product.get("last_notified_price")
             if last_notified_raw is not None:
                 last_notified = Decimal(str(last_notified_raw))
-                if product.current_price >= (last_notified - price_drop_tolerance_try):
+                if product.effective_price >= (last_notified - price_drop_tolerance_try):
                     return False, "already_notified_at_same_or_lower_price"
 
         return True, "eligible"
@@ -223,11 +223,29 @@ class PushNotifier:
         prefix = "Kritik Stok · " if product.is_critical_stock else ""
         title = f"{prefix}%{discount_pct} İndirim · {brand_label}"
 
-        price_part = format_try_price(product.current_price)
-        if product.original_price is not None and product.original_price > product.current_price:
-            price_part = f"{price_part} (Eski: {format_try_price(product.original_price)})"
+        has_cart_price = (
+            product.cart_price is not None
+            and product.cart_price < product.current_price
+        )
+        if has_cart_price and product.cart_price is not None:
+            ref_old = (
+                product.original_price
+                if (product.original_price is not None and product.original_price > product.cart_price)
+                else product.current_price
+            )
+            price_part = (
+                f"Sepette {format_try_price(product.cart_price)} (%{discount_pct} indirim"
+                f", Eski: {format_try_price(ref_old)})"
+            )
+        else:
+            price_part = format_try_price(product.current_price)
+            if product.original_price is not None and product.original_price > product.current_price:
+                price_part = f"{price_part} (Eski: {format_try_price(product.original_price)})"
 
         detail_segments: list[str] = [f"{product.title} — {price_part}"]
+
+        if product.promo_badge and not has_cart_price:
+            detail_segments.append(product.promo_badge)
 
         sizes_to_show = matched_sizes or product.available_sizes
         if sizes_to_show:
@@ -361,7 +379,7 @@ class PushNotifier:
         report = self.notify_all(payload)
         if report.sent > 0:
             try:
-                self._db.mark_product_notified(product_id, product.current_price)
+                self._db.mark_product_notified(product_id, product.effective_price)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to mark product %s as notified: %s", product_id, exc)
         return report

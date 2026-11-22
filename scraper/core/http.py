@@ -446,6 +446,148 @@ def infer_product_gender(
     return default
 
 
+# ----------------------------------------------------------------------------
+# Cart Discount (`cart_price`) & Promo Badge (`promo_badge`) helpers
+# ----------------------------------------------------------------------------
+_CONDITIONAL_PROMO_RE = re.compile(
+    r"(?:"
+    r"\b[2-9]\.?\s*(?:ürün|urun|adet|parça|parca)\w*|"
+    r"\b(?:ikinci|üçüncü|ucuncu)\s*(?:ürün|urun|parça|parca)\w*|"
+    r"\b\d+\s*al\s*\d+\s*(?:öde|ode)\b|"
+    r"\b\d+\s*(?:adet|ürün|urun|parça|parca)\s*(?:ve\s*)?(?:üzeri|uzeri|al[ıi]m|alana|al[ıi]şveriş|alisveris)|"
+    r"\b(?:ve\s*)?(?:üzeri|uzeri|üstü|ustu|alt[ıi])\b|"
+    r"\b(?:varan|kadar)\b|"
+    r"\b(?:kupon|kod(?:u|la)|kodu\s*ile|ilk\s*(?:sipariş|siparis|alışveriş|alisveris)\w*|üyelere\s*özel|uyelere\s*özel|"
+    r"uygulama(?:ya|da)\s*özel|app\s*özel|hediye\s*çeki|kargo\s*bedava|ücretsiz\s*kargo|taksit)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_CART_WORD_RE = re.compile(r"\bsepet\w*", re.IGNORECASE)
+_CART_EXPLICIT_PRICE_RE = re.compile(
+    r"sepet\w*(?:\s*(?:fiyat[ıi]?|net|özel|ozel))?\s*[:\-]?\s*"
+    r"(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:tl|₺)",
+    re.IGNORECASE,
+)
+_CART_TL_DISCOUNT_RE = re.compile(
+    r"sepet\w*(?:\s*ek)?\s*(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+)\s*(?:tl|₺)\s*indirim",
+    re.IGNORECASE,
+)
+_CART_PERCENT_RE = re.compile(
+    r"(?:%\s*(\d{1,2})(?!\d)|(?<!\d)(\d{1,2})\s*%)",
+    re.IGNORECASE,
+)
+
+
+def clean_promo_badge_text(raw_text: str | None) -> str | None:
+    """Strip HTML tags and normalize whitespace for a short campaign badge."""
+    if not raw_text:
+        return None
+    stripped = re.sub(r"<[^>]+>", " ", str(raw_text))
+    cleaned = re.sub(r"\s+", " ", stripped).strip()
+    if not cleaned or cleaned in {"-", "--", "null", "None"}:
+        return None
+    return cleaned[:120]
+
+
+def is_conditional_promo(badge_text: str | None) -> bool:
+    """Return True if a promo badge represents multi-buy or conditional spend/coupon rules.
+
+    Examples returning True:
+    - "2. Ürüne %50 İndirim"
+    - "3 Al 2 Öde"
+    - "2000 TL ve Üzeri Sepette %20"
+    - "Sepette %50'ye Varan İndirim"
+    """
+    if not badge_text:
+        return False
+    lowered = turkish_lower(badge_text)
+    return bool(_CONDITIONAL_PROMO_RE.search(lowered))
+
+
+def parse_cart_price_from_badge(
+    current_price: Decimal | None,
+    badge_text: str | None,
+) -> Decimal | None:
+    """Derive a guaranteed single-item `cart_price` from a non-conditional Turkish cart badge."""
+    if current_price is None or current_price <= Decimal("0") or not badge_text:
+        return None
+
+    cleaned = clean_promo_badge_text(badge_text)
+    if not cleaned:
+        return None
+
+    lowered = turkish_lower(cleaned)
+    if not _CART_WORD_RE.search(lowered):
+        return None
+
+    if is_conditional_promo(cleaned):
+        return None
+
+    # 1. Fixed TL discount amount in cart: e.g. "Sepette 200 TL İndirim"
+    tl_disc_match = _CART_TL_DISCOUNT_RE.search(lowered)
+    if tl_disc_match:
+        disc_amount = parse_try_price(tl_disc_match.group(1))
+        if disc_amount is not None and Decimal("0") < disc_amount < current_price:
+            return (current_price - disc_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    # 2. Direct net price in cart: e.g. "Sepette 899 TL", "Sepette 1.299,90 TL"
+    price_match = _CART_EXPLICIT_PRICE_RE.search(lowered)
+    if price_match:
+        parsed_price = parse_try_price(price_match.group(1))
+        if parsed_price is not None and Decimal("0") < parsed_price < current_price:
+            return parsed_price
+
+    # 3. Single-item cart percentage: e.g. "Sepette %20", "Sepette Ek %15 İndirim", "Sepette + %10"
+    pct_match = _CART_PERCENT_RE.search(lowered)
+    if pct_match:
+        raw_pct = pct_match.group(1) or pct_match.group(2)
+        if raw_pct and raw_pct.isdigit():
+            pct = int(raw_pct)
+            if 1 <= pct <= 80:
+                computed = (
+                    current_price * (Decimal("100") - Decimal(pct)) / Decimal("100")
+                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                if Decimal("0") < computed < current_price:
+                    return computed
+
+    return None
+
+
+def resolve_cart_promo(
+    current_price: Decimal | None,
+    *,
+    explicit_cart_price: Decimal | None = None,
+    promo_badge: str | None = None,
+) -> tuple[Decimal | None, str | None]:
+    """Resolve `(cart_price, promo_badge)` cleanly from explicit API fields and/or badge text."""
+    cleaned_badge = clean_promo_badge_text(promo_badge)
+    cart_price: Decimal | None = None
+
+    if (
+        explicit_cart_price is not None
+        and current_price is not None
+        and Decimal("0") < explicit_cart_price < current_price
+    ):
+        cart_price = explicit_cart_price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    elif cleaned_badge is not None and current_price is not None:
+        cart_price = parse_cart_price_from_badge(current_price, cleaned_badge)
+
+    # If API gave an explicit cart price without a text badge, synthesize a concise Turkish badge
+    if cart_price is not None and not cleaned_badge and current_price is not None and current_price > cart_price:
+        extra_pct = int(
+            (((current_price - cart_price) / current_price) * Decimal("100")).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+        if extra_pct >= 1:
+            cleaned_badge = f"Sepette %{extra_pct} İndirim"
+        else:
+            cleaned_badge = f"Sepette {int(cart_price)} TL"
+
+    return cart_price, cleaned_badge
+
+
 class HttpClient:
     """Resilient `curl_cffi` HTTP client with TLS impersonation rotation and WAF detection."""
 

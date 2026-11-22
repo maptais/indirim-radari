@@ -13,6 +13,8 @@ export interface ProductRow {
   image_url: string | null;
   current_price: number;
   original_price: number | null;
+  cart_price: number | null;
+  promo_badge: string | null;
   discount_percent: number;
   currency: string;
   available_sizes: string[];
@@ -79,6 +81,7 @@ export interface ProductsApiResponse {
     totalActive: number;
     realDiscountCount: number;
     criticalStockCount: number;
+    cartPromoCount: number;
     latestScrapedAt: string | null;
   };
 }
