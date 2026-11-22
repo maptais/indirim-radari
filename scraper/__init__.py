@@ -1,0 +1,1 @@
+"""İndirim Radarı scraper package."""

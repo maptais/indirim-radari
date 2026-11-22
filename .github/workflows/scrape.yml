@@ -1,0 +1,136 @@
+name: İndirim Radarı — Otomatik Tarama
+
+on:
+  schedule:
+    # Her 2 saatte bir (UTC) otomatik çalışır
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      brand:
+        description: "Taranacak marka(lar) veya grup: all, inditex, eren, shoes, mango, trendyol, clothing, independents veya virgülle ayrılmış liste"
+        required: false
+        default: "all"
+        type: string
+      target_mode:
+        description: "Çalışma modu uyumluluk filtresi (cloud: veri merkezi uyumlu markalar, local: WAF korumalı yerel markalar, all: tümü)"
+        required: false
+        default: "cloud"
+        type: choice
+        options:
+          - cloud
+          - all
+          - local
+      section:
+        description: "Taranacak reyon"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - men
+          - women
+      max_categories:
+        description: "Marka başına maksimum kategori sayısı"
+        required: false
+        default: "12"
+        type: string
+      skip_ai:
+        description: "AI tarz puanlamasını atla (--skip-ai)"
+        required: false
+        default: false
+        type: boolean
+      no_notify:
+        description: "Web Push bildirim gönderimini kapat (--no-notify)"
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: "Supabase'e yazmadan test çalıştır (--dry-run)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: indirim-radari-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    name: Marka Taraması & AI Puanlama
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Bağımlılıkları yükle
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scraper/requirements.txt
+
+      - name: Gerekli gizli anahtarları doğrula
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::SUPABASE_URL ve SUPABASE_SERVICE_ROLE_KEY GitHub Secrets içinde tanımlı olmalıdır."
+            exit 1
+          fi
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::warning::GEMINI_API_KEY tanımlı değil; AI tarz puanlaması güvenli biçimde atlanacak."
+          fi
+          if [ -z "$VAPID_PRIVATE_KEY" ]; then
+            echo "::warning::VAPID_PRIVATE_KEY tanımlı değil; Web Push bildirimleri atlanacak."
+          fi
+
+      - name: İndirim taramasını çalıştır
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_CLAIMS_SUB: ${{ secrets.VAPID_CLAIMS_SUB }}
+          SCRAPER_RUN_MODE: cloud
+          PYTHONUNBUFFERED: "1"
+          INPUT_BRAND: ${{ github.event.inputs.brand || 'all' }}
+          INPUT_TARGET_MODE: ${{ github.event.inputs.target_mode || 'cloud' }}
+          INPUT_SECTION: ${{ github.event.inputs.section || 'all' }}
+          INPUT_MAX_CATEGORIES: ${{ github.event.inputs.max_categories || '12' }}
+          INPUT_SKIP_AI: ${{ github.event.inputs.skip_ai || 'false' }}
+          INPUT_NO_NOTIFY: ${{ github.event.inputs.no_notify || 'false' }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          ARGS=(
+            "--brand" "$INPUT_BRAND"
+            "--target-mode" "$INPUT_TARGET_MODE"
+            "--section" "$INPUT_SECTION"
+            "--max-categories" "$INPUT_MAX_CATEGORIES"
+            "--run-mode" "cloud"
+          )
+
+          if [ "$INPUT_SKIP_AI" = "true" ]; then
+            ARGS+=("--skip-ai")
+          fi
+          if [ "$INPUT_NO_NOTIFY" = "true" ]; then
+            ARGS+=("--no-notify")
+          fi
+          if [ "$INPUT_DRY_RUN" = "true" ]; then
+            ARGS+=("--dry-run")
+          fi
+
+          python -m scraper.main "${ARGS[@]}"

@@ -1,0 +1,16 @@
+# HTTP & TLS fingerprint impersonation
+curl_cffi>=0.7.4
+
+# Supabase PostgreSQL client
+supabase>=2.10.0
+
+# Typed settings & schema validation
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+python-dotenv>=1.0.1
+
+# Web Push notifications (Faz 3)
+pywebpush>=2.0.0
+
+# Gemini AI style scoring (Faz 4)
+google-genai>=1.0.0
