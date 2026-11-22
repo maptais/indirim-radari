@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scraper.core.ai_scorer import AIStyleScorer
-from scraper.core.config import AppSettings, UserSettings, get_settings
+from scraper.core.config import VALID_TARGET_GENDERS, AppSettings, UserSettings, get_settings
 from scraper.core.db import DatabaseClient
 from scraper.core.filters import FilterBatchSummary, FilterResult, ProductFilter
 from scraper.core.notifier import PushNotifier
@@ -83,6 +83,62 @@ SUPPORTED_BRANDS: tuple[str, ...] = (
     + tuple(INDEPENDENT_CLOTHING_SCRAPERS.keys())
     + tuple(INDEPENDENT_SHOE_SCRAPERS.keys())
 )
+
+# Brands that exclusively serve a single gender storefront; skipped automatically
+# when none of their supported genders are present in `user_settings.target_genders`.
+BRAND_GENDER_SCOPE: dict[str, frozenset[str]] = {
+    "trendyolmilla": frozenset({"women"}),
+    "trendyolman": frozenset({"men"}),
+    "mangoman": frozenset({"men"}),
+}
+
+
+def _parse_gender_cli_arg(raw_gender: str) -> list[str]:
+    """Parse `--gender` CLI override (e.g. `men`, `men,unisex`, `all`) into canonical list."""
+    normalized = raw_gender.strip().lower()
+    if normalized == "all":
+        return list(VALID_TARGET_GENDERS)
+    tokens: list[str] = []
+    seen: set[str] = set()
+    invalid: list[str] = []
+    for part in normalized.split(","):
+        tok = part.strip()
+        if not tok:
+            continue
+        if tok == "all":
+            return list(VALID_TARGET_GENDERS)
+        if tok in VALID_TARGET_GENDERS:
+            if tok not in seen:
+                seen.add(tok)
+                tokens.append(tok)
+        else:
+            invalid.append(tok)
+    if invalid or not tokens:
+        raise SystemExit(
+            f"Geçersiz --gender değeri: '{raw_gender}'. "
+            f"Desteklenen değerler: {', '.join(VALID_TARGET_GENDERS)}, all (virgülle ayrılabilir)."
+        )
+    return tokens
+
+
+def _filter_brands_by_target_genders(
+    brands: list[str],
+    target_genders: list[str],
+) -> tuple[list[str], list[str]]:
+    """Skip single-gender brands that have no overlap with the user's `target_genders`."""
+    desired = {g.strip().lower() for g in target_genders if g.strip()}
+    if not desired:
+        return list(brands), []
+
+    selected: list[str] = []
+    skipped: list[str] = []
+    for slug in brands:
+        scope = BRAND_GENDER_SCOPE.get(slug)
+        if scope is not None and not (scope & desired):
+            skipped.append(slug)
+        else:
+            selected.append(slug)
+    return selected, skipped
 
 
 def get_brand_default_run_mode(brand: str) -> ScrapeRunMode:
@@ -287,7 +343,7 @@ def _print_brand_report(
                 comment_suffix = f" — {ai_comment}" if ai_comment else ""
                 ai_line = f"\n    AI Tarz: {ai_score}/10{comment_suffix}"
             print(
-                f"  • [{product.category.value}] {product.title}\n"
+                f"  • [{product.category.value} | {product.gender.value}] {product.title}\n"
                 f"    Fiyat: {product.current_price} TL (Eski: {orig}, %{product.discount_percent}) | "
                 f"{real_tag}{days_tag}\n"
                 f"    Eşleşen bedenler: {', '.join(f_res.matched_sizes)} "
@@ -356,7 +412,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
             db = DatabaseClient(app_settings)
             user_settings = db.get_user_settings()
             logger.info(
-                "Loaded UserSettings from Supabase (tops=%s, bottoms=%s, shoes=%s, lookback=%dd).",
+                "Loaded UserSettings from Supabase (genders=%s, tops=%s, bottoms=%s, shoes=%s, lookback=%dd).",
+                user_settings.target_genders,
                 user_settings.top_sizes,
                 user_settings.bottom_sizes,
                 user_settings.shoe_sizes,
@@ -373,6 +430,41 @@ def run_pipeline(args: argparse.Namespace) -> int:
             else:
                 logger.error("Supabase connection/settings failed: %s", exc)
                 return 1
+
+    # Apply optional `--gender` CLI override for testing/manual runs
+    gender_override = getattr(args, "gender", None)
+    if gender_override:
+        override_genders = _parse_gender_cli_arg(gender_override)
+        user_settings = user_settings.model_copy(update={"target_genders": override_genders})
+        logger.info("Overriding target_genders via --gender CLI flag: %s", user_settings.target_genders)
+
+    # Smart brand skipping based on target_genders (e.g. skip trendyolmilla if women not selected)
+    brands, skipped_gender_brands = _filter_brands_by_target_genders(brands, user_settings.target_genders)
+    if skipped_gender_brands:
+        logger.info(
+            "Skipped %d brand(s) incompatible with target_genders=%s: %s",
+            len(skipped_gender_brands),
+            user_settings.target_genders,
+            ", ".join(skipped_gender_brands),
+        )
+    if not brands:
+        logger.warning(
+            "No brands left after filtering for target_genders=%s; exiting cleanly.",
+            user_settings.target_genders,
+        )
+        return 0
+
+    raw_section = getattr(args, "section", "auto")
+    effective_section: Literal["all", "men", "women"] = (
+        user_settings.to_scraper_section()
+        if not raw_section or raw_section == "auto"
+        else raw_section
+    )
+    logger.info(
+        "Active gender filter: target_genders=%s -> scraper section='%s'",
+        user_settings.target_genders,
+        effective_section,
+    )
 
     run_mode = ScrapeRunMode(
         args.run_mode or (app_settings.scraper_run_mode if app_settings else "local")
@@ -409,14 +501,32 @@ def run_pipeline(args: argparse.Namespace) -> int:
         started = time.perf_counter()
         log_id: int | None = None
 
-        scraper = _build_scraper(
-            brand,
-            section=args.section,
-            max_categories=args.max_categories,
-            include_regular=args.include_regular,
-            only_discounted=not args.include_full_price,
-            app_settings=app_settings,
-        )
+        try:
+            scraper = _build_scraper(
+                brand,
+                section=effective_section,
+                max_categories=args.max_categories,
+                include_regular=args.include_regular,
+                only_discounted=not args.include_full_price,
+                app_settings=app_settings,
+            )
+        except Exception as exc:  # noqa: BLE001
+            had_failure = True
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            err_msg = f"Scraper init failed: {type(exc).__name__}: {exc}"
+            logger.exception("[%s] %s", brand, err_msg)
+            if not args.dry_run and db is not None:
+                try:
+                    fail_log_id = db.start_scrape_log(brand=brand, engine=brand, run_mode=run_mode)
+                    db.finish_scrape_log(
+                        fail_log_id,
+                        status=ScrapeStatus.FAILED,
+                        duration_ms=duration_ms,
+                        error_message=err_msg,
+                    )
+                except Exception as log_exc:  # noqa: BLE001
+                    logger.warning("[%s] Could not record init failure in scrape_log: %s", brand, log_exc)
+            continue
 
         if not args.dry_run and db is not None:
             try:
@@ -658,10 +768,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Yalnızca default_run_mode='local' olan markaları tara (--target-mode local kısayolu).",
     )
     parser.add_argument(
+        "--gender",
+        default=None,
+        help=(
+            "Test/geçici geçersiz kılma için hedef cinsiyet(ler): men, women, unisex, all "
+            "veya virgülle ayrılmış liste (ör. men,unisex). Belirtilmezse Supabase user_settings.target_genders okunur."
+        ),
+    )
+    parser.add_argument(
         "--section",
-        choices=("all", "men", "women"),
-        default="all",
-        help="Taranacak reyon: all, men veya women (varsayılan: all)",
+        choices=("auto", "all", "men", "women"),
+        default="auto",
+        help="Taranacak reyon: auto (user_settings.target_genders'a göre otomatik), all, men veya women (varsayılan: auto)",
     )
     parser.add_argument(
         "--dry-run",

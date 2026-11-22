@@ -25,6 +25,14 @@ class ProductCategory(StrEnum):
     OTHER = "other"
 
 
+class ProductGender(StrEnum):
+    """Canonical product gender classifications used across scrapers, DB, and UI."""
+
+    MEN = "men"
+    WOMEN = "women"
+    UNISEX = "unisex"
+
+
 class ScrapeRunMode(StrEnum):
     """Execution environment mode for bot-protection tracking."""
 
@@ -53,6 +61,7 @@ class ProductItem(BaseModel):
     external_id: str = Field(..., min_length=1, description="Store-specific unique product ID")
     title: str = Field(..., min_length=1, description="Product display title")
     category: ProductCategory = Field(default=ProductCategory.OTHER)
+    gender: ProductGender = Field(default=ProductGender.UNISEX)
     url: str = Field(..., min_length=1, description="Direct product page URL")
     image_url: str | None = Field(default=None)
     current_price: Decimal = Field(..., ge=Decimal("0"))
@@ -132,6 +141,7 @@ class ProductItem(BaseModel):
             "external_id": self.external_id,
             "title": self.title,
             "category": self.category.value,
+            "gender": self.gender.value,
             "url": self.url,
             "image_url": self.image_url,
             "current_price": float(self.current_price),

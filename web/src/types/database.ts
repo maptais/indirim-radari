@@ -1,11 +1,14 @@
 export type ProductCategory = "shoes" | "tops" | "bottoms" | "outerwear" | "other";
 
+export type ProductGender = "men" | "women" | "unisex";
+
 export interface ProductRow {
   id: string;
   brand: string;
   external_id: string;
   title: string;
   category: ProductCategory;
+  gender: ProductGender;
   url: string;
   image_url: string | null;
   current_price: number;
@@ -39,6 +42,7 @@ export type CategoryThresholds = Record<ProductCategory, CategoryThreshold>;
 
 export interface UserSettingsRow {
   id: number;
+  target_genders: ProductGender[];
   top_sizes: string[];
   bottom_sizes: string[];
   shoe_sizes: string[];
@@ -70,6 +74,7 @@ export interface PushSubscriptionRow {
 export interface ProductsApiResponse {
   products: ProductRow[];
   brands: string[];
+  targetGenders: ProductGender[];
   stats: {
     totalActive: number;
     realDiscountCount: number;

@@ -17,6 +17,7 @@ import {
   formatRelativeTimeTr,
   getBrandLabel,
   getCategoryLabel,
+  getGenderLabel,
 } from "@/lib/constants";
 import type { ProductRow } from "@/types/database";
 
@@ -29,6 +30,7 @@ export function ProductCard({ product }: ProductCardProps) {
 
   const brandLabel = getBrandLabel(product.brand);
   const categoryLabel = getCategoryLabel(product.category);
+  const genderLabel = getGenderLabel(product.gender);
   const hasOriginalPrice =
     product.original_price !== null &&
     product.original_price > product.current_price;
@@ -140,6 +142,8 @@ export function ProductCard({ product }: ProductCardProps) {
             </span>
             <span className="text-zinc-600">•</span>
             <span className="text-zinc-400">{categoryLabel}</span>
+            <span className="text-zinc-600">•</span>
+            <span className="text-zinc-500">{genderLabel}</span>
           </div>
           <span className="text-zinc-500">
             {formatRelativeTimeTr(product.last_seen_at)}

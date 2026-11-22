@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from scraper.core.config import CategoryThreshold, UserSettings
 from scraper.core.filters import ProductFilter
 from scraper.core.notifier import BRAND_DISPLAY_NAMES
-from scraper.engines.base import ProductCategory, ScrapeRunMode, ScrapeStatus, ScraperBlockedError
+from scraper.engines.base import ProductCategory, ProductGender, ScrapeRunMode, ScrapeStatus, ScraperBlockedError
 from scraper.engines.independents import (
     DeFactoScraper,
     HMScraper,
@@ -115,6 +115,7 @@ class TestPhase6ClothingScrapers(unittest.TestCase):
         assert item is not None
         self.assertEqual(item.brand, "mangoman")
         self.assertEqual(item.category, ProductCategory.OUTERWEAR)
+        self.assertEqual(item.gender, ProductGender.MEN)
         self.assertEqual(item.discount_percent, 50)
         self.assertEqual(item.available_sizes, ["M", "L"])
         self.assertTrue(item.is_critical_stock)
@@ -207,6 +208,7 @@ class TestPhase6ClothingScrapers(unittest.TestCase):
         assert item is not None
         self.assertEqual(item.brand, "hm")
         self.assertEqual(item.category, ProductCategory.TOPS)
+        self.assertEqual(item.gender, ProductGender.MEN)
         self.assertEqual(item.current_price, Decimal("779.00"))
         self.assertEqual(item.original_price, Decimal("1299.00"))
         self.assertEqual(item.discount_percent, 40)

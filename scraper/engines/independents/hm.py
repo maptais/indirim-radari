@@ -10,32 +10,41 @@ from urllib.parse import urljoin
 from ..base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
-from ...core.filters import turkish_lower
-from ...core.http import HttpClient, infer_product_category, parse_try_price
+from ...core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
 _CRITICAL_STOCK_THRESHOLD = 2
-_KIDS_MARKERS = ("çocuk", "cocuk", "bebek", "baby", "kids", "junior")
 
 HM_CATEGORY_SPECS: dict[str, tuple[tuple[str, str, str | None], ...]] = {
     "all": (
+        ("/men/sale/view-all", "men_sale", None),
+        ("/ladies/sale/view-all", "ladies_sale", None),
+        ("/men/deals/deal", "men_deals", None),
+        ("/ladies/deals/deal", "ladies_deals", None),
         ("/men/shop-by-product/view-all", "men_all", "sale:true||oldSale:true"),
         ("/ladies/shop-by-product/view-all", "ladies_all", "sale:true||oldSale:true"),
-        ("/men/sale/view-all", "men_sale", "sale:true||oldSale:true"),
-        ("/ladies/sale/view-all", "ladies_sale", "sale:true||oldSale:true"),
     ),
     "men": (
+        ("/men/sale/view-all", "men_sale", None),
+        ("/men/deals/deal", "men_deals", None),
         ("/men/shop-by-product/view-all", "men_all", "sale:true||oldSale:true"),
-        ("/men/sale/view-all", "men_sale", "sale:true||oldSale:true"),
     ),
     "women": (
+        ("/ladies/sale/view-all", "ladies_sale", None),
+        ("/ladies/deals/deal", "ladies_deals", None),
         ("/ladies/shop-by-product/view-all", "ladies_all", "sale:true||oldSale:true"),
-        ("/ladies/sale/view-all", "ladies_sale", "sale:true||oldSale:true"),
     ),
 }
 
@@ -188,11 +197,30 @@ class HMScraper(BaseScraper):
             return None
 
         main_cat = str(raw.get("mainCatCode") or "")
-        combined_text = turkish_lower(f"{title} {main_cat} {category_id}")
-        if any(k in combined_text for k in _KIDS_MARKERS):
+        if is_kids_product(title, main_cat, category_id):
+            return None
+
+        inferred_gender = infer_product_gender(
+            title,
+            main_cat,
+            category_id,
+            rel_url,
+            default=ProductGender.UNISEX,
+        )
+        if self.section == "men" and inferred_gender == ProductGender.WOMEN:
+            return None
+        if self.section == "women" and inferred_gender == ProductGender.MEN:
             return None
 
         current_price, original_price = self._extract_prices(raw)
+        # Fallback to top-level redPrice/priorPrice/regularPrice if present
+        if original_price is None and current_price is not None:
+            for orig_key in ("priorPrice", "regularPrice", "whitePrice"):
+                cand = parse_try_price(raw.get(orig_key))
+                if cand is not None and cand > current_price:
+                    original_price = cand
+                    break
+
         if current_price is None:
             return None
         if self.only_discounted and original_price is None:
@@ -226,6 +254,7 @@ class HMScraper(BaseScraper):
             external_id=prod_id,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=urljoin(f"{self.web_base_url}/", rel_url.lstrip("/")),
             image_url=image_url,
             current_price=current_price,

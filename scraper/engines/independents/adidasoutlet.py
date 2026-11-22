@@ -10,12 +10,18 @@ from urllib.parse import urljoin
 from ..base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
-from ...core.filters import turkish_lower
-from ...core.http import HttpClient, infer_product_category, parse_try_price
+from ...core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,30 +96,35 @@ class AdidasOutletScraper(BaseScraper):
     def close(self) -> None:
         self.http.close()
 
-    def _matches_section(self, raw_item: dict[str, Any], query_slug: str) -> bool:
-        combined = turkish_lower(
-            " ".join(
-                str(x)
-                for x in (
-                    raw_item.get("displayName") or "",
-                    raw_item.get("subTitle") or "",
-                    raw_item.get("category") or "",
-                    raw_item.get("gender") or "",
-                    query_slug,
-                )
-                if x
-            )
+    @staticmethod
+    def _infer_gender(raw_item: dict[str, Any], query_slug: str) -> ProductGender:
+        return infer_product_gender(
+            str(raw_item.get("gender") or ""),
+            str(raw_item.get("subTitle") or ""),
+            str(raw_item.get("displayName") or ""),
+            str(raw_item.get("category") or ""),
+            query_slug,
+            default=ProductGender.UNISEX,
         )
-        if any(k in combined for k in _KIDS_MARKERS):
+
+    def _matches_section(self, raw_item: dict[str, Any], query_slug: str) -> bool:
+        if is_kids_product(
+            str(raw_item.get("displayName") or ""),
+            str(raw_item.get("subTitle") or ""),
+            str(raw_item.get("category") or ""),
+            str(raw_item.get("gender") or ""),
+            query_slug,
+        ):
             return False
         if self.section == "all":
             return True
-        if "unisex" in combined:
+        gender = self._infer_gender(raw_item, query_slug)
+        if gender == ProductGender.UNISEX:
             return True
         if self.section == "men":
-            return "erkek" in combined or "men" in combined or ("kadın" not in combined and "kadin" not in combined and "women" not in combined)
+            return gender == ProductGender.MEN
         if self.section == "women":
-            return "kadın" in combined or "kadin" in combined or "women" in combined
+            return gender == ProductGender.WOMEN
         return True
 
     @staticmethod
@@ -201,11 +212,14 @@ class AdidasOutletScraper(BaseScraper):
             default=ProductCategory.SHOES,
         )
 
+        inferred_gender = self._infer_gender(raw_item, query_slug)
+
         return ProductItem(
             brand=self.brand,
             external_id=product_id,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=urljoin(f"{self.base_url}/", link),
             image_url=image_url,
             current_price=current_price,

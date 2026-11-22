@@ -13,12 +13,19 @@ from urllib.parse import urljoin
 from .base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ..core.filters import extract_polyester_percent, turkish_lower
-from ..core.http import HttpClient, infer_product_category, parse_try_price
+from ..core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +123,11 @@ class TrendyolScraper(BaseScraper):
         max_pages_per_category: int = 2,
         max_detail_fetches: int = 24,
         fetch_variant_details: bool = True,
-        max_retries: int = 2,
+        max_retries: int = 3,
         impersonate: str | None = None,
         timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.4,
-        max_jitter_seconds: float = 1.0,
+        min_jitter_seconds: float = 0.6,
+        max_jitter_seconds: float = 1.4,
     ) -> None:
         brand_key = brand.strip().lower()
         if brand_key not in TRENDYOL_BRAND_CONFIGS:
@@ -149,9 +156,14 @@ class TrendyolScraper(BaseScraper):
             self.brand,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
-            impersonate=impersonate,
+            impersonate=impersonate or "chrome131",
             default_headers={
                 "Referer": f"{self.base_url}/",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
             },
         )
 
@@ -285,16 +297,30 @@ class TrendyolScraper(BaseScraper):
         eff_original = eff_max if eff_max > eff_current else None
         return eff_current, eff_original
 
+    def _infer_gender(self, raw: dict[str, Any], category_path: str = "") -> ProductGender:
+        title = str(raw.get("name") or "")
+        cat_obj = raw.get("category") or {}
+        cat_name = str(cat_obj.get("name") if isinstance(cat_obj, dict) else "")
+        default_gender = (
+            ProductGender.MEN if self.config.gender_scope == "men" else ProductGender.WOMEN
+        )
+        return infer_product_gender(
+            title,
+            cat_name,
+            category_path,
+            default=default_gender,
+        )
+
     def _matches_brand_and_section(self, raw: dict[str, Any]) -> bool:
         title = str(raw.get("name") or "")
         cat_obj = raw.get("category") or {}
         cat_name = str(cat_obj.get("name") if isinstance(cat_obj, dict) else "")
-        combined = turkish_lower(f"{title} {cat_name}")
-        if any(k in combined for k in _KIDS_MARKERS):
+        if is_kids_product(title, cat_name):
             return False
 
         if self.section != "all" and self.section != self.config.gender_scope:
-            if "unisex" not in combined:
+            gender = self._infer_gender(raw)
+            if gender != ProductGender.UNISEX:
                 return False
         return True
 
@@ -363,6 +389,8 @@ class TrendyolScraper(BaseScraper):
             default=ProductCategory.TOPS,
         )
 
+        inferred_gender = self._infer_gender(raw, category_path)
+
         # Normalize product URL without noisy query params if desired, keeping full link clickable
         clean_url = urljoin(f"{self.base_url}/", rel_url.lstrip("/"))
 
@@ -371,6 +399,7 @@ class TrendyolScraper(BaseScraper):
             external_id=prod_id,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=clean_url,
             image_url=image_url,
             current_price=current_price,
@@ -412,7 +441,7 @@ class TrendyolScraper(BaseScraper):
                 if page > 1:
                     self.sleep_jitter()
 
-                url = f"{self.base_url}{path}?sst=PRICE_BY_ASC&pi={page}"
+                url = f"{self.base_url}{path}?sst=MOST_RATED&pi={page}"
                 try:
                     page_html = self.http.get_text(url)
                 except ScraperBlockedError:
@@ -459,10 +488,11 @@ class TrendyolScraper(BaseScraper):
 
         products: list[ProductItem] = []
         detail_fetches = 0
+        pdp_blocked = False
 
         for raw_prod, path, _ in candidates:
             detail_html: str | None = None
-            if self.fetch_variant_details:
+            if self.fetch_variant_details and not pdp_blocked:
                 if detail_fetches >= self.max_detail_fetches:
                     break
                 if detail_fetches > 0:
@@ -474,8 +504,17 @@ class TrendyolScraper(BaseScraper):
                 try:
                     detail_html = self.http.get_text(pdp_url)
                     detail_fetches += 1
-                except ScraperBlockedError:
-                    raise
+                except ScraperBlockedError as exc:
+                    if not products:
+                        raise
+                    logger.warning(
+                        "[%s] PDP blocked after %d products (%s); stopping detail fetches gracefully.",
+                        self.brand,
+                        len(products),
+                        exc,
+                    )
+                    pdp_blocked = True
+                    detail_html = None
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("[%s] Detail fetch failed for %s: %s", self.brand, pdp_url, exc)
                     continue

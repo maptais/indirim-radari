@@ -1,8 +1,34 @@
 import { DealsFeed } from "@/components/DealsFeed";
+import { DEFAULT_TARGET_GENDERS, GENDER_ORDER } from "@/lib/constants";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import type { ProductRow, ProductsApiResponse } from "@/types/database";
+import type {
+  ProductGender,
+  ProductRow,
+  ProductsApiResponse,
+} from "@/types/database";
 
 export const dynamic = "force-dynamic";
+
+const VALID_GENDERS = new Set<ProductGender>(GENDER_ORDER);
+
+function normalizeGender(raw: unknown): ProductGender {
+  const cleaned = String(raw ?? "").trim().toLowerCase() as ProductGender;
+  return VALID_GENDERS.has(cleaned) ? cleaned : "unisex";
+}
+
+function normalizeTargetGenders(raw: unknown): ProductGender[] {
+  if (!Array.isArray(raw)) return [...DEFAULT_TARGET_GENDERS];
+  const seen = new Set<ProductGender>();
+  const result: ProductGender[] = [];
+  for (const item of raw) {
+    const val = String(item ?? "").trim().toLowerCase() as ProductGender;
+    if (VALID_GENDERS.has(val) && !seen.has(val)) {
+      seen.add(val);
+      result.push(val);
+    }
+  }
+  return result.length > 0 ? result : [...DEFAULT_TARGET_GENDERS];
+}
 
 async function loadInitialProducts(): Promise<{
   data: ProductsApiResponse;
@@ -11,6 +37,7 @@ async function loadInitialProducts(): Promise<{
   const empty: ProductsApiResponse = {
     products: [],
     brands: [],
+    targetGenders: [...DEFAULT_TARGET_GENDERS],
     stats: {
       totalActive: 0,
       realDiscountCount: 0,
@@ -21,21 +48,30 @@ async function loadInitialProducts(): Promise<{
 
   try {
     const supabase = getSupabaseAdmin();
-    const [{ data: rawProducts, error: productsError }, { data: latestLogs }] =
-      await Promise.all([
-        supabase
-          .from("products")
-          .select("*")
-          .eq("is_active", true)
-          .order("discount_percent", { ascending: false })
-          .order("last_seen_at", { ascending: false })
-          .limit(300),
-        supabase
-          .from("scrape_logs")
-          .select("finished_at, started_at")
-          .order("started_at", { ascending: false })
-          .limit(1),
-      ]);
+    const [
+      { data: rawProducts, error: productsError },
+      { data: latestLogs },
+      { data: userSettingsRow },
+    ] = await Promise.all([
+      supabase
+        .from("products")
+        .select("*")
+        .eq("is_active", true)
+        .order("discount_percent", { ascending: false })
+        .order("last_seen_at", { ascending: false })
+        .limit(500),
+      supabase
+        .from("scrape_logs")
+        .select("finished_at, started_at")
+        .order("started_at", { ascending: false })
+        .limit(1),
+      supabase
+        .from("user_settings")
+        .select("target_genders")
+        .eq("id", 1)
+        .limit(1)
+        .maybeSingle(),
+    ]);
 
     if (productsError) {
       return {
@@ -44,8 +80,12 @@ async function loadInitialProducts(): Promise<{
       };
     }
 
-    const products: ProductRow[] = (rawProducts || []).map((row) => ({
+    const targetGenders = normalizeTargetGenders(userSettingsRow?.target_genders);
+    const allowedGenders = new Set<ProductGender>(targetGenders);
+
+    const allProducts: ProductRow[] = (rawProducts || []).map((row) => ({
       ...(row as ProductRow),
+      gender: normalizeGender(row.gender),
       current_price: Number(row.current_price ?? 0),
       original_price:
         row.original_price !== null && row.original_price !== undefined
@@ -69,6 +109,8 @@ async function loadInitialProducts(): Promise<{
           ? Number(row.ai_score)
           : null,
     }));
+
+    const products = allProducts.filter((item) => allowedGenders.has(item.gender));
 
     const brandsSet = new Set<string>();
     let realDiscountCount = 0;
@@ -97,6 +139,7 @@ async function loadInitialProducts(): Promise<{
       data: {
         products,
         brands: Array.from(brandsSet).sort(),
+        targetGenders,
         stats: {
           totalActive: products.length,
           realDiscountCount,

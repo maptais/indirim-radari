@@ -190,6 +190,9 @@ class PushNotifier:
         if not user_settings.notifications_enabled:
             return False, "notifications_disabled_in_settings"
 
+        if user_settings.target_genders and product.gender.value not in user_settings.target_genders:
+            return False, f"gender_mismatch:{product.gender.value}"
+
         if not analysis.is_real_discount:
             return False, "not_real_discount"
 

@@ -76,10 +76,14 @@ class CategoryThreshold(BaseModel):
     max_price_try: Decimal = Field(default=Decimal("2500"), ge=Decimal("0"))
 
 
+VALID_TARGET_GENDERS: tuple[str, ...] = ("men", "women", "unisex")
+
+
 class UserSettings(BaseModel):
     """Typed representation of the singleton `public.user_settings` table row."""
 
     id: int = Field(default=1)
+    target_genders: list[str] = Field(default_factory=lambda: ["men", "unisex"])
     top_sizes: list[str] = Field(default_factory=lambda: ["M", "L"])
     bottom_sizes: list[str] = Field(default_factory=lambda: ["32", "M", "L"])
     shoe_sizes: list[str] = Field(default_factory=lambda: ["42", "42.5", "43"])
@@ -91,6 +95,31 @@ class UserSettings(BaseModel):
     min_ai_notify_score: int = Field(default=7, ge=1, le=10)
     price_history_lookback_days: int = Field(default=45, ge=7, le=365)
     notifications_enabled: bool = Field(default=True)
+
+    @field_validator("target_genders", mode="before")
+    @classmethod
+    def normalize_target_genders(cls, value: object) -> list[str]:
+        if not isinstance(value, (list, tuple, set)):
+            return ["men", "unisex"]
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for item in value:
+            token = str(item).strip().lower()
+            if token in VALID_TARGET_GENDERS and token not in seen:
+                seen.add(token)
+                cleaned.append(token)
+        return cleaned or ["men", "unisex"]
+
+    def to_scraper_section(self) -> Literal["all", "men", "women"]:
+        """Map `target_genders` to a scraper storefront section filter (`men`, `women`, or `all`)."""
+        genders = set(self.target_genders)
+        wants_men = "men" in genders
+        wants_women = "women" in genders
+        if wants_men and not wants_women:
+            return "men"
+        if wants_women and not wants_men:
+            return "women"
+        return "all"
 
     def get_threshold(self, category: str) -> CategoryThreshold:
         """Return threshold for a category, falling back to `other` or defaults."""

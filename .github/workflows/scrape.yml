@@ -21,11 +21,12 @@ on:
           - all
           - local
       section:
-        description: "Taranacak reyon"
+        description: "Taranacak reyon (auto: Ayarlar'daki target_genders tercihine göre otomatik)"
         required: false
-        default: "all"
+        default: "auto"
         type: choice
         options:
+          - auto
           - all
           - men
           - women
@@ -109,7 +110,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
           INPUT_BRAND: ${{ github.event.inputs.brand || 'all' }}
           INPUT_TARGET_MODE: ${{ github.event.inputs.target_mode || 'cloud' }}
-          INPUT_SECTION: ${{ github.event.inputs.section || 'all' }}
+          INPUT_SECTION: ${{ github.event.inputs.section || 'auto' }}
           INPUT_MAX_CATEGORIES: ${{ github.event.inputs.max_categories || '12' }}
           INPUT_SKIP_AI: ${{ github.event.inputs.skip_ai || 'false' }}
           INPUT_NO_NOTIFY: ${{ github.event.inputs.no_notify || 'false' }}

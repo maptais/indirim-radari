@@ -17,7 +17,7 @@ import certifi
 from curl_cffi import requests as curl_requests
 
 from .filters import turkish_lower
-from ..engines.base import ProductCategory, ScraperBlockedError
+from ..engines.base import ProductCategory, ProductGender, ScraperBlockedError
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +369,80 @@ def infer_product_category(
         return ProductCategory.BOTTOMS
     if _has_any(_TOPS_KEYWORDS):
         return ProductCategory.TOPS
+    return default
+
+
+_KIDS_HINT_RE = re.compile(
+    r"(?<![a-zçğıöşü])(?:"
+    r"çocuk|cocuk|bebek|baby|kids?|junior|niño|nino|niña|nina|infant|toddler|"
+    r"kız\s+çocuk|kiz\s+cocuk|erkek\s+çocuk|erkek\s+cocuk|genç\s+çocuk|genc\s+cocuk|"
+    r"boy|boys|girl|girls|preschool|big\s+kids|little\s+kids|youth|teen"
+    r")(?![a-zçğıöşü])|\((?:ps|td|gs|jr)\)|(?:\s|/|-)(?:ps|td|gs|jr)(?:\s|/|-|$)",
+    re.IGNORECASE,
+)
+
+_UNISEX_HINT_RE = re.compile(r"(?<![a-zçğıöşü])unisex(?![a-zçğıöşü])", re.IGNORECASE)
+
+_WOMEN_HINT_RE = re.compile(
+    r"(?<![a-zçğıöşü])(?:"
+    r"kadın|kadin|woman|women|womens|ladies|lady|mujer|señora|senora|bayan|jjxx|"
+    r"elbise|etek|bluz|büstiyer|bustiyer|sütyen|sutyen|bralet|topuklu|babet|hamile|"
+    r"crop\s*top|tulum|tesettür|tesettur|korseli|tayt|bikini|mayokini|pareo|saten\s+elbise"
+    r")(?![a-zçğıöşü])",
+    re.IGNORECASE,
+)
+
+_MEN_HINT_RE = re.compile(
+    r"(?<![a-zçğıöşü])(?:"
+    r"erkek|men|mens|man|hombre|caballero|bay"
+    r")(?![a-zçğıöşü])",
+    re.IGNORECASE,
+)
+
+
+def is_kids_product(*hints: str) -> bool:
+    """Return True if any hint indicates a kids/baby/junior product."""
+    combined = turkish_lower(" ".join(h for h in hints if h))
+    if not combined:
+        return False
+    return bool(_KIDS_HINT_RE.search(combined))
+
+
+def infer_product_gender(
+    *hints: str,
+    default: ProductGender = ProductGender.UNISEX,
+) -> ProductGender:
+    """Infer canonical ProductGender (`men`, `women`, `unisex`) from ordered hints.
+
+    Hints should be ordered from most specific (e.g., explicit gender field, product title)
+    to broadest (e.g., URL slug, category path).
+    """
+    saw_both = False
+    for raw_hint in hints:
+        if not raw_hint:
+            continue
+        cleaned = turkish_lower(str(raw_hint))
+        if not cleaned:
+            continue
+        # Normalize path/slug separators so tokens like `men_shirts` or `/erkek-ayakkabi/` match boundaries
+        tokenized = re.sub(r"[/_\-\.,:|>]+", " ", cleaned)
+
+        if _UNISEX_HINT_RE.search(tokenized):
+            return ProductGender.UNISEX
+
+        has_women = bool(_WOMEN_HINT_RE.search(tokenized))
+        has_men = bool(_MEN_HINT_RE.search(tokenized))
+
+        if has_women and has_men:
+            saw_both = True
+            continue
+        if has_women:
+            return ProductGender.WOMEN
+        if has_men:
+            return ProductGender.MEN
+
+    if saw_both:
+        return ProductGender.UNISEX
     return default
 
 

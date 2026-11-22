@@ -12,12 +12,19 @@ from urllib.parse import urlencode, urljoin
 from .base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ..core.filters import extract_polyester_percent, turkish_lower
-from ..core.http import HttpClient, infer_product_category, parse_try_price
+from ..core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +71,13 @@ EREN_BRAND_CONFIGS: dict[str, AkinonBrandConfig] = {
         display_name="SuperStep",
         domain="www.superstep.com.tr",
         category_paths={
-            "all": ("/erkek-ayakkabi/", "/kadin-ayakkabi/", "/erkek-giyim/", "/kadin-giyim/"),
-            "men": ("/erkek-ayakkabi/", "/erkek-giyim/"),
-            "women": ("/kadin-ayakkabi/", "/kadin-giyim/"),
+            "all": ("/indirim/", "/erkek-ayakkabi/", "/kadin-ayakkabi/", "/erkek-giyim/", "/kadin-giyim/"),
+            "men": ("/erkek-ayakkabi/", "/indirim/", "/erkek-giyim/"),
+            "women": ("/kadin-ayakkabi/", "/indirim/", "/kadin-giyim/"),
         },
-        default_sorter="number",  # İndirim Oranına Göre
+        # `default` surfaces popular in-stock items with fuller size runs rather than
+        # 85%-off single-XS clearance leftovers that `number` puts at the top.
+        default_sorter="default",
         default_category=ProductCategory.SHOES,
     ),
     "occasion": AkinonBrandConfig(
@@ -164,55 +173,66 @@ class AkinonScraper(BaseScraper):
         sep = "&" if "?" in full_url else "?"
         return f"{full_url}{sep}format=json"
 
+    @staticmethod
+    def _infer_gender(raw_product: dict[str, Any], category_path: str) -> ProductGender:
+        attrs = raw_product.get("attributes") or {}
+        title = str(raw_product.get("name") or "")
+        is_erkek_flag = str(attrs.get("integration_erkek") or "") == "1"
+        is_kadin_flag = str(attrs.get("integration_kadin") or "") == "1"
+        if is_erkek_flag and is_kadin_flag:
+            return ProductGender.UNISEX
+
+        explicit_attr_gender = " ".join(
+            str(attrs.get(k) or "")
+            for k in (
+                "integration_cinsiyet",
+                "integration_gender",
+                "emarsys_cinsiyet",
+                "integration_erp_cinsiyet",
+                "cinsiyet",
+            )
+            if attrs.get(k)
+        )
+        default_gender = ProductGender.UNISEX
+        if is_erkek_flag and not is_kadin_flag:
+            default_gender = ProductGender.MEN
+        elif is_kadin_flag and not is_erkek_flag:
+            default_gender = ProductGender.WOMEN
+
+        return infer_product_gender(
+            explicit_attr_gender,
+            title,
+            str(raw_product.get("absolute_url") or ""),
+            category_path,
+            default=default_gender,
+        )
+
     def _matches_section(self, raw_product: dict[str, Any], category_path: str) -> bool:
         attrs = raw_product.get("attributes") or {}
         title = str(raw_product.get("name") or "")
-        gender_parts = [
+        if str(attrs.get("integration_cocuk") or "") == "1":
+            return False
+        if is_kids_product(
+            title,
             str(attrs.get("integration_cinsiyet") or ""),
             str(attrs.get("integration_gender") or ""),
             str(attrs.get("emarsys_cinsiyet") or ""),
             str(attrs.get("integration_erp_cinsiyet") or ""),
             str(attrs.get("cinsiyet") or ""),
-            title,
             category_path,
-        ]
-        combined = turkish_lower(" ".join(p for p in gender_parts if p))
-
-        # Always skip kids / baby items
-        if str(attrs.get("integration_cocuk") or "") == "1":
-            return False
-        if any(kw in combined for kw in _KIDS_KEYWORDS):
+        ):
             return False
 
         if self.section == "all":
             return True
 
-        title_lower = turkish_lower(title)
-        title_has_men = bool(re.search(r"(?<![a-zçğıöşü])erkek", title_lower))
-        title_has_women = bool(re.search(r"(?<![a-zçğıöşü])kad[ıi]n", title_lower))
-        title_is_unisex = "unisex" in title_lower
-        if not title_is_unisex:
-            if self.section == "men" and title_has_women and not title_has_men:
-                return False
-            if self.section == "women" and title_has_men and not title_has_women:
-                return False
-
-        is_erkek_flag = str(attrs.get("integration_erkek") or "") == "1"
-        is_kadin_flag = str(attrs.get("integration_kadin") or "") == "1"
-        if is_erkek_flag or is_kadin_flag:
-            if self.section == "men":
-                return is_erkek_flag
-            if self.section == "women":
-                return is_kadin_flag
-
-        is_unisex = "unisex" in combined
-        is_men = is_unisex or any(re.search(rf"(?<![a-zçğıöşü]){kw}", combined) for kw in ("erkek", "men", "man"))
-        is_women = is_unisex or any(re.search(rf"(?<![a-zçğıöşü]){kw}", combined) for kw in ("kadın", "kadin", "women", "woman"))
-
+        gender = self._infer_gender(raw_product, category_path)
+        if gender == ProductGender.UNISEX:
+            return True
         if self.section == "men":
-            return is_men or not is_women
+            return gender == ProductGender.MEN
         if self.section == "women":
-            return is_women or not is_men
+            return gender == ProductGender.WOMEN
         return True
 
     @staticmethod
@@ -403,11 +423,14 @@ class AkinonScraper(BaseScraper):
             )
         )
 
+        inferred_gender = self._infer_gender(raw, category_path)
+
         return ProductItem(
             brand=self.brand,
             external_id=external_id,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=urljoin(f"{self.base_url}/", abs_url),
             image_url=self._extract_image_url(raw),
             current_price=current_price,
@@ -559,7 +582,7 @@ class ErenScraper(AkinonScraper):
         only_discounted: bool = True,
         max_categories: int = 4,
         max_pages_per_category: int = 2,
-        max_detail_fetches: int = 24,
+        max_detail_fetches: int = 36,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,

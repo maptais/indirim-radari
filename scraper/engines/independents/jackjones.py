@@ -12,35 +12,39 @@ from urllib.parse import urljoin
 from ..base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ...core.filters import extract_polyester_percent, turkish_lower
-from ...core.http import HttpClient, infer_product_category, parse_try_price
+from ...core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
-_KIDS_MARKERS = ("çocuk", "cocuk", "junior", "kids", "bebek", "baby")
 _INITIAL_STATE_MARKER = "window.__INITIAL_STATE__"
 
 JACKJONES_CATEGORY_PATHS: dict[str, tuple[str, ...]] = {
     "all": (
-        "/tr-tr/indirim",
-        "/tr-tr/erkek-giyim",
-        "/tr-tr/kadin-giyim",
-        "/tr-tr/erkek-giyim/kazak",
-        "/tr-tr/kadin-giyim/kazak-ve-hirka",
+        "/tr-tr/erkek-giyim?sorting=highest_discount",
+        "/tr-tr/kadin-giyim?sorting=highest_discount",
+        "/tr-tr/erkek-giyim/kazak?sorting=highest_discount",
+        "/tr-tr/kadin-giyim/kazak-ve-hirka?sorting=highest_discount",
     ),
     "men": (
-        "/tr-tr/indirim",
-        "/tr-tr/erkek-giyim",
-        "/tr-tr/erkek-giyim/kazak",
+        "/tr-tr/erkek-giyim?sorting=highest_discount",
+        "/tr-tr/erkek-giyim/kazak?sorting=highest_discount",
+        "/tr-tr/erkek-giyim/sweatshirt?sorting=highest_discount",
     ),
     "women": (
-        "/tr-tr/indirim",
-        "/tr-tr/kadin-giyim",
-        "/tr-tr/kadin-giyim/kazak-ve-hirka",
+        "/tr-tr/kadin-giyim?sorting=highest_discount",
+        "/tr-tr/kadin-giyim/kazak-ve-hirka?sorting=highest_discount",
     ),
 }
 
@@ -95,6 +99,7 @@ class JackJonesScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 4,
+        max_pages_per_category: int = 2,
         max_detail_fetches: int = 24,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
@@ -111,6 +116,7 @@ class JackJonesScraper(BaseScraper):
         self.section = section
         self.only_discounted = only_discounted
         self.max_categories = max(1, max_categories)
+        self.max_pages_per_category = max(1, max_pages_per_category)
         self.max_detail_fetches = max(0, max_detail_fetches)
         self.fetch_variant_details = fetch_variant_details
 
@@ -236,25 +242,37 @@ class JackJonesScraper(BaseScraper):
 
         return current_price, original_price
 
+    @staticmethod
+    def _infer_gender(raw: dict[str, Any], category_path: str) -> ProductGender:
+        title = str(raw.get("name") or "")
+        sub_brand = str(raw.get("subBrand") or "")
+        url = str(raw.get("url") or "")
+        brand_str = turkish_lower(str(raw.get("brand") or ""))
+        default_gender = ProductGender.MEN if "jack" in brand_str and "jjxx" not in turkish_lower(sub_brand) else ProductGender.UNISEX
+        return infer_product_gender(
+            sub_brand,
+            title,
+            url,
+            category_path,
+            default=default_gender,
+        )
+
     def _matches_section(self, raw: dict[str, Any], category_path: str) -> bool:
         title = str(raw.get("name") or "")
         sub_brand = str(raw.get("subBrand") or "")
         url = str(raw.get("url") or "")
-        combined = turkish_lower(f"{title} {sub_brand} {url} {category_path}")
-
-        if any(k in combined for k in _KIDS_MARKERS):
+        if is_kids_product(title, sub_brand, url, category_path):
             return False
         if self.section == "all":
             return True
-        if "unisex" in combined:
-            return True
 
-        is_women = "kadın" in combined or "kadin" in combined or "jjxx" in combined
-        is_men = "erkek" in combined or (not is_women and "jack" in turkish_lower(str(raw.get("brand") or "")))
+        gender = self._infer_gender(raw, category_path)
+        if gender == ProductGender.UNISEX:
+            return True
         if self.section == "men":
-            return is_men and not is_women
+            return gender == ProductGender.MEN
         if self.section == "women":
-            return is_women
+            return gender == ProductGender.WOMEN
         return True
 
     def parse_listing_product(
@@ -332,11 +350,14 @@ class JackJonesScraper(BaseScraper):
             default=ProductCategory.TOPS,
         )
 
+        inferred_gender = self._infer_gender(raw, category_path)
+
         return ProductItem(
             brand=self.brand,
             external_id=prod_id,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=urljoin(f"{self.base_url}/", rel_url.lstrip("/")),
             image_url=image_url,
             current_price=current_price,
@@ -365,34 +386,53 @@ class JackJonesScraper(BaseScraper):
             if idx > 0:
                 self.sleep_jitter()
 
-            url = f"{self.base_url}{path}"
-            try:
-                page_html = self.http.get_text(url)
-            except ScraperBlockedError:
-                raise
-            except Exception as exc:  # noqa: BLE001
+            cat_failed = False
+            for page in range(1, self.max_pages_per_category + 1):
+                if page > 1:
+                    self.sleep_jitter()
+
+                sep = "&" if "?" in path else "?"
+                url = f"{self.base_url}{path}" if page == 1 else f"{self.base_url}{path}{sep}page={page}"
+                try:
+                    page_html = self.http.get_text(url)
+                except ScraperBlockedError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[%s] Category %s page %d failed: %s", self.brand, path, page, exc)
+                    if page == 1:
+                        cat_failed = True
+                    break
+
+                raw_products = self.extract_listing_products(page_html)
+                if not raw_products:
+                    break
+
+                found_discounted_on_page = 0
+                for raw_prod in raw_products:
+                    pid = str(raw_prod.get("id") or "").strip()
+                    if not pid or pid in seen_ids:
+                        continue
+                    if raw_prod.get("inStock") is False:
+                        continue
+                    if not self._matches_section(raw_prod, path):
+                        continue
+                    cur_p, orig_p = self._extract_prices(raw_prod.get("price") or {})
+                    if cur_p is None:
+                        continue
+                    if self.only_discounted and orig_p is None:
+                        continue
+
+                    disc_ratio = float((orig_p - cur_p) / orig_p) if orig_p and orig_p > cur_p else 0.0
+                    seen_ids.add(pid)
+                    candidates.append((raw_prod, path, disc_ratio))
+                    found_discounted_on_page += 1
+
+                # Because results are sorted by `highest_discount`, stop paging once a page has no discounts
+                if self.only_discounted and found_discounted_on_page == 0:
+                    break
+
+            if cat_failed:
                 cat_failures += 1
-                logger.warning("[%s] Category %s failed: %s", self.brand, path, exc)
-                continue
-
-            raw_products = self.extract_listing_products(page_html)
-            for raw_prod in raw_products:
-                pid = str(raw_prod.get("id") or "").strip()
-                if not pid or pid in seen_ids:
-                    continue
-                if raw_prod.get("inStock") is False:
-                    continue
-                if not self._matches_section(raw_prod, path):
-                    continue
-                cur_p, orig_p = self._extract_prices(raw_prod.get("price") or {})
-                if cur_p is None:
-                    continue
-                if self.only_discounted and orig_p is None:
-                    continue
-
-                disc_ratio = float((orig_p - cur_p) / orig_p) if orig_p and orig_p > cur_p else 0.0
-                seen_ids.add(pid)
-                candidates.append((raw_prod, path, disc_ratio))
 
         if cat_failures == len(selected_paths) and not candidates:
             raise RuntimeError(f"All {len(selected_paths)} Jack & Jones categories failed")

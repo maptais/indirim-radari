@@ -44,11 +44,15 @@ Kullanıcının kendi giyim bedenine, ayakkabı numarasına, kumaş/kalıp terci
     │   └── workflows/
     │       └── scrape.yml
     ├── supabase/
-    │   └── schema.sql
+    │   ├── schema.sql
+    │   └── migrations/
+    │       └── 001_add_gender_preference.sql
     ├── scraper/
     │   ├── requirements.txt
     │   ├── .env.example
     │   ├── main.py
+    │   ├── run_local.ps1
+    │   ├── run_local.bat
     │   ├── core/
     │   │   ├── config.py
     │   │   ├── db.py
@@ -107,7 +111,8 @@ Kullanıcının kendi giyim bedenine, ayakkabı numarasına, kumaş/kalıp terci
 - [x] `scraper/core/ai_scorer.py` modülünü Gemini API ile yaz (ürün başlığı + görsel URL/verisi + kullanıcının tarz profili -> 1-10 puan ve tek cümlelik gerekçe).
 - [x] AI puanlamasını yalnızca beden, negatif filtre, eşik ve gerçek indirim kontrolünden geçen yeni ürünlerde çalıştır.
 - [x] `.github/workflows/scrape.yml` dosyasını yaz (2 saatte bir çalışan cron + manuel tetikleme `workflow_dispatch`, GitHub Secrets entegrasyonu).
-- [ ] Web uygulamasını Vercel'e deploy et, iPhone ana ekranına ekleyip canlı uçtan uca bildirim testini doğrula.
+- [x] Web uygulamasını Vercel'e deploy et (`web/` canlı ortamda yayında, GitHub Actions `workflow_dispatch` doğrulandı).
+- [ ] iPhone Safari'den ana ekrana ekleyip canlı uçtan uca Web Push bildirim testini doğrula.
 
 ### Faz 5: Ayakkabı & Outlet Paketi (9 Marka)
 - [x] `scraper/engines/eren.py` ortak motorunu yaz (SuperStep, Occasion, FashFed).
@@ -122,6 +127,13 @@ Kullanıcının kendi giyim bedenine, ayakkabı numarasına, kumaş/kalıp terci
 - [x] Bağımsız giyim modüllerini ekle: H&M, DeFacto, Mavi, Jack & Jones.
 - [x] Veri merkezi IP'sini sert bloklayan (Cloudflare/Akamai) markalar tespit edilirse `scrape_logs` üzerinden raporla ve lokal çalıştırma / alternatif çekim bayrağı (`run_mode: cloud | local`) ekle.
 - [x] Arayüze son tarama durumlarını gösteren mini "Sistem Durumu" sekmesi ekle.
+
+### Faz 7: Dinamik Cinsiyet Tercihi, Cloud Marka Onarımları ve Yerel Cron
+- [x] Veritabanı şemasını ve migration dosyasını (`supabase/migrations/001_add_gender_preference.sql`) `products.gender` ve `user_settings.target_genders` sütunlarıyla güncelle.
+- [x] 22 marka motorunun tamamına `gender` (`men`/`women`/`unisex`) etiketi, çocuk/bebek elemesi ve `user_settings.target_genders` bazlı dinamik marka/kategori filtrelemesi ekle (`--gender` CLI desteğiyle).
+- [x] Web arayüzünde `/settings` ve `/api/settings` içine çoklu Cinsiyet Tercihi seçicisi, `/api/products` ve ana sayfaya hızlı cinsiyet geçiş filtreleri (`Ayarlarım / Tümü / Erkek / Kadın / Unisex`) ekle.
+- [x] Eksik 12 cloud markayı tek tek inceleyip onar (Zara PDP AJAX beden/kumaş çekimi, Bershka `store_id=44109521`, Mango Man `previousPrices` dict şeması & 429 fallback, Mavi `:sale` sıralaması, Jack & Jones `?sorting=highest_discount` + sayfalama, Sneaks Up `?pageIndex` sayfalama + `/sneaks-out`, SuperStep `/indirim/` + `default` sıralama, Puma Outlet tekilleştirme, Trendyol WAF/PDP dayanıklılığı, H&M `deals/deal` + `sale/view-all` uyumu).
+- [x] Yerel WAF korumalı markalar (`adidasoutlet` & `mangooutlet`) için Unicode/ASCII-dışı yol uyumlu Windows Task Scheduler çalıştırma betiklerini (`scraper/run_local.ps1`, `scraper/run_local.bat`) oluştur.
 
 ---
 

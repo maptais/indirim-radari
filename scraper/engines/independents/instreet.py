@@ -10,12 +10,19 @@ from urllib.parse import urljoin
 from ..base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ...core.filters import turkish_lower
-from ...core.http import HttpClient, infer_product_category, parse_try_price
+from ...core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,25 +75,39 @@ class InStreetScraper(BaseScraper):
     def close(self) -> None:
         self.http.close()
 
+    @staticmethod
+    def _infer_gender(raw: dict[str, Any], full_title: str) -> ProductGender:
+        breadcrumb_names = " ".join(
+            str(b.get("name") or "")
+            for b in (raw.get("breadcrumb") or [])
+            if isinstance(b, dict)
+        )
+        return infer_product_gender(
+            str(raw.get("gender") or ""),
+            full_title,
+            breadcrumb_names,
+            str(raw.get("relativeUrl") or ""),
+            default=ProductGender.UNISEX,
+        )
+
     def _matches_section(self, raw: dict[str, Any], full_title: str) -> bool:
         breadcrumb_names = " ".join(
             str(b.get("name") or "")
             for b in (raw.get("breadcrumb") or [])
             if isinstance(b, dict)
         )
-        combined = turkish_lower(f"{full_title} {breadcrumb_names} {raw.get('relativeUrl') or ''}")
-        if any(k in combined for k in _KIDS_MARKERS):
+        if is_kids_product(full_title, breadcrumb_names, str(raw.get("relativeUrl") or "")):
             return False
         if self.section == "all":
             return True
-        if "unisex" in combined:
+
+        gender = self._infer_gender(raw, full_title)
+        if gender == ProductGender.UNISEX:
             return True
-        is_men = "erkek" in combined
-        is_women = "kadın" in combined or "kadin" in combined
         if self.section == "men":
-            return is_men or not is_women
+            return gender == ProductGender.MEN
         if self.section == "women":
-            return is_women or not is_men
+            return gender == ProductGender.WOMEN
         return True
 
     def parse_product(self, raw: dict[str, Any]) -> ProductItem | None:
@@ -168,11 +189,14 @@ class InStreetScraper(BaseScraper):
             default=ProductCategory.SHOES,
         )
 
+        inferred_gender = self._infer_gender(raw, full_title)
+
         return ProductItem(
             brand=self.brand,
             external_id=external_id,
             title=full_title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=product_url,
             image_url=image_url,
             current_price=current_price,

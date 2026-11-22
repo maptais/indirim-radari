@@ -11,6 +11,7 @@ import {
   Save,
   Sparkles,
   Tag,
+  Users,
   X,
 } from "lucide-react";
 
@@ -19,10 +20,16 @@ import {
   BOTTOM_SIZE_SUGGESTIONS,
   CATEGORY_LABELS,
   CATEGORY_ORDER,
+  GENDER_LABELS,
+  GENDER_ORDER,
   SHOE_SIZE_SUGGESTIONS,
   TOP_SIZE_SUGGESTIONS,
 } from "@/lib/constants";
-import type { ProductCategory, UserSettingsRow } from "@/types/database";
+import type {
+  ProductCategory,
+  ProductGender,
+  UserSettingsRow,
+} from "@/types/database";
 
 interface SettingsFormProps {
   initialSettings: UserSettingsRow | null;
@@ -182,6 +189,19 @@ export function SettingsForm({
     initialError ? { type: "error", text: initialError } : null
   );
 
+  const toggleTargetGender = (gender: ProductGender) => {
+    if (!settings) return;
+    const current = settings.target_genders;
+    const exists = current.includes(gender);
+    if (exists && current.length <= 1) {
+      return;
+    }
+    const next = exists
+      ? current.filter((g) => g !== gender)
+      : GENDER_ORDER.filter((g) => g === gender || current.includes(g));
+    setSettings({ ...settings, target_genders: next });
+  };
+
   const updateThreshold = (
     category: ProductCategory,
     field: "min_discount_percent" | "max_price_try",
@@ -295,6 +315,48 @@ export function SettingsForm({
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* 0. Gender Preference */}
+            <section className="space-y-4 rounded-3xl border border-white/10 bg-zinc-900/70 p-5">
+              <div className="flex items-center gap-2">
+                <Users className="h-4 w-4 text-emerald-400" />
+                <h2 className="text-base font-semibold text-zinc-100">
+                  Cinsiyet Tercihi
+                </h2>
+              </div>
+              <p className="text-xs leading-relaxed text-zinc-400">
+                Tarayıcı, AI puanlama, bildirimler ve ana sayfa akışı seçtiğiniz
+                reyonlara göre otomatik filtrelenir (en az bir seçenek aktif
+                olmalıdır).
+              </p>
+
+              <div className="grid grid-cols-3 gap-2.5">
+                {GENDER_ORDER.map((gender) => {
+                  const selected = settings.target_genders.includes(gender);
+                  const isOnlySelected =
+                    selected && settings.target_genders.length <= 1;
+                  return (
+                    <button
+                      key={gender}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={isOnlySelected}
+                      onClick={() => toggleTargetGender(gender)}
+                      className={`flex items-center justify-center gap-1.5 rounded-2xl border px-3 py-3 text-xs font-semibold transition ${
+                        selected
+                          ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200 shadow-sm shadow-emerald-500/10"
+                          : "border-white/10 bg-zinc-950/70 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+                      } ${isOnlySelected ? "cursor-not-allowed opacity-90" : ""}`}
+                    >
+                      {selected && (
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                      )}
+                      <span>{GENDER_LABELS[gender]}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
             {/* 1. Size Preferences */}
             <section className="space-y-5 rounded-3xl border border-white/10 bg-zinc-900/70 p-5">
               <div className="flex items-center gap-2">

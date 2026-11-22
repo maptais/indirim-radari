@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS public.products (
     title               TEXT NOT NULL,
     category            TEXT NOT NULL DEFAULT 'other'
                         CHECK (category IN ('shoes', 'tops', 'bottoms', 'outerwear', 'other')),
+    gender              TEXT NOT NULL DEFAULT 'unisex'
+                        CHECK (gender IN ('men', 'women', 'unisex')),
     url                 TEXT NOT NULL,
     image_url           TEXT,
     current_price       NUMERIC(10, 2) NOT NULL CHECK (current_price >= 0),
@@ -59,6 +61,9 @@ CREATE TABLE IF NOT EXISTS public.products (
 
 CREATE INDEX IF NOT EXISTS idx_products_brand_category
     ON public.products (brand, category);
+
+CREATE INDEX IF NOT EXISTS idx_products_active_gender
+    ON public.products (is_active, gender, discount_percent DESC);
 
 CREATE INDEX IF NOT EXISTS idx_products_active_last_seen
     ON public.products (is_active, last_seen_at DESC);
@@ -98,6 +103,11 @@ CREATE INDEX IF NOT EXISTS idx_price_history_recorded_at
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS public.user_settings (
     id                          SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    target_genders              TEXT[] NOT NULL DEFAULT ARRAY['men', 'unisex']
+                                CHECK (
+                                    cardinality(target_genders) > 0
+                                    AND target_genders <@ ARRAY['men', 'women', 'unisex']::TEXT[]
+                                ),
     top_sizes                   TEXT[] NOT NULL DEFAULT ARRAY['M', 'L'],
     bottom_sizes                TEXT[] NOT NULL DEFAULT ARRAY['32', 'M', 'L'],
     shoe_sizes                  TEXT[] NOT NULL DEFAULT ARRAY['42', '42.5', '43'],
@@ -211,6 +221,7 @@ CREATE POLICY "Allow public read on scrape_logs"
 -- ============================================================================
 INSERT INTO public.user_settings (
     id,
+    target_genders,
     top_sizes,
     bottom_sizes,
     shoe_sizes,
@@ -225,6 +236,7 @@ INSERT INTO public.user_settings (
 )
 VALUES (
     1,
+    ARRAY['men', 'unisex'],
     ARRAY['M', 'L'],
     ARRAY['32', '33', 'M', 'L'],
     ARRAY['42', '42.5', '43'],

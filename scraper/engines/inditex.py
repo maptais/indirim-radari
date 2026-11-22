@@ -15,12 +15,19 @@ from curl_cffi import requests as curl_requests
 from .base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ..core.filters import extract_polyester_percent, turkish_lower
-from ..core.http import IMPERSONATE_PROFILES, get_safe_ca_bundle, is_blocked_body
+from ..core.http import (
+    IMPERSONATE_PROFILES,
+    get_safe_ca_bundle,
+    infer_product_gender,
+    is_blocked_body,
+    is_kids_product,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +272,7 @@ INDITEX_BRAND_CONFIGS: dict[str, InditexBrandConfig] = {
         domain="www.bershka.com",
         store_path="tr",
         static_cdn="https://static.bershka.net",
-        store_id=45109521,
+        store_id=44109521,
         catalog_id=40259534,
         language_id=-43,
         app_id=1,
@@ -332,6 +339,7 @@ class InditexScraper(BaseScraper):
         only_discounted: bool = True,
         include_regular_categories: bool = False,
         max_categories: int = 12,
+        max_detail_fetches: int = 36,
         batch_size: int = 30,
         max_retries: int = 2,
         impersonate: str | None = None,
@@ -358,9 +366,10 @@ class InditexScraper(BaseScraper):
         self.only_discounted = only_discounted
         self.include_regular_categories = include_regular_categories
         self.max_categories = max(1, max_categories)
+        self.max_detail_fetches = max(0, max_detail_fetches)
         self.batch_size = max(5, min(50, batch_size))
         self.max_retries = max(0, max_retries)
-        self._impersonate = impersonate or random.choice(IMPERSONATE_PROFILES)
+        self._impersonate = impersonate or random.choice(("chrome131", "chrome124"))
         self._ca_bundle = get_safe_ca_bundle()
         self._session: curl_requests.Session | None = None
 
@@ -485,6 +494,8 @@ class InditexScraper(BaseScraper):
     def _matches_section(self, path_lower: str, section_hint: str) -> bool:
         if any(excl in path_lower for excl in _EXCLUDED_SECTION_KEYWORDS):
             return False
+        if is_kids_product(path_lower, section_hint):
+            return False
 
         if self.section == "all":
             return True
@@ -602,7 +613,8 @@ class InditexScraper(BaseScraper):
             f"?languageId={cfg.language_id}&typeCatalog={cfg.type_catalog}&appId={cfg.app_id}"
         )
         cat_payload = self._get_json(cat_url)
-        categories = self._collect_categories(cat_payload.get("categories") or [])
+        raw_categories = cat_payload.get("categories") or []
+        categories = self._collect_categories(raw_categories)
         logger.info("[%s] Selected %d categories to scan (section=%s)", self.brand, len(categories), self.section)
 
         if not categories:
@@ -611,36 +623,62 @@ class InditexScraper(BaseScraper):
         products_by_id: dict[str, ProductItem] = {}
         category_failures = 0
 
-        for idx, cat in enumerate(categories):
-            if idx > 0:
-                self.sleep_jitter()
+        def _scan(cat_list: list[_CategoryNode]) -> int:
+            nonlocal category_failures
+            scanned_failures = 0
+            for idx, cat in enumerate(cat_list):
+                if idx > 0:
+                    self.sleep_jitter()
 
+                try:
+                    cat_items = self._fetch_itxrest_category(cat)
+                    for item in cat_items:
+                        if item.external_id not in products_by_id:
+                            products_by_id[item.external_id] = item
+                    logger.info(
+                        "[%s] Category %s (%d): parsed %d items (running unique total: %d)",
+                        self.brand,
+                        cat.name,
+                        cat.category_id,
+                        len(cat_items),
+                        len(products_by_id),
+                    )
+                except ScraperBlockedError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — isolate single category failure
+                    scanned_failures += 1
+                    category_failures += 1
+                    logger.warning(
+                        "[%s] Skipping category %s (%d) due to error: %s",
+                        self.brand,
+                        cat.name,
+                        cat.category_id,
+                        exc,
+                    )
+            return scanned_failures
+
+        first_failures = _scan(categories)
+
+        # If promo-only categories yielded 0 products (e.g. off-season promo banner),
+        # automatically fall back to regular clothing/shoe categories to catch hidden markdowns.
+        if not products_by_id and not self.include_regular_categories:
+            prev_flag = self.include_regular_categories
+            self.include_regular_categories = True
             try:
-                cat_items = self._fetch_itxrest_category(cat)
-                for item in cat_items:
-                    if item.external_id not in products_by_id:
-                        products_by_id[item.external_id] = item
+                expanded = self._collect_categories(raw_categories)
+            finally:
+                self.include_regular_categories = prev_flag
+            scanned_ids = {c.category_id for c in categories}
+            fallback_cats = [c for c in expanded if c.category_id not in scanned_ids][: min(6, self.max_categories)]
+            if fallback_cats:
                 logger.info(
-                    "[%s] Category %s (%d): parsed %d items (running unique total: %d)",
+                    "[%s] Promo categories yielded 0 items; scanning %d fallback regular categories.",
                     self.brand,
-                    cat.name,
-                    cat.category_id,
-                    len(cat_items),
-                    len(products_by_id),
+                    len(fallback_cats),
                 )
-            except ScraperBlockedError:
-                raise
-            except Exception as exc:  # noqa: BLE001 — isolate single category failure
-                category_failures += 1
-                logger.warning(
-                    "[%s] Skipping category %s (%d) due to error: %s",
-                    self.brand,
-                    cat.name,
-                    cat.category_id,
-                    exc,
-                )
+                _scan(fallback_cats)
 
-        if category_failures == len(categories) and not products_by_id:
+        if first_failures == len(categories) and not products_by_id:
             raise RuntimeError(f"All {len(categories)} categories failed for {self.brand}")
 
         return list(products_by_id.values())
@@ -808,6 +846,17 @@ class InditexScraper(BaseScraper):
             category.path,
         )
 
+        inferred_gender = infer_product_gender(
+            str(raw.get("sectionNameEN") or ""),
+            str(raw.get("sectionName") or ""),
+            category.section_hint,
+            title,
+            category.path,
+            default=ProductGender.UNISEX,
+        )
+        if is_kids_product(title, category.path):
+            return None
+
         # Include color suffix in external_id when bundle holds distinct color variants
         external_id = str(raw_id)
         description = str(detail.get("longDescription") or detail.get("description") or "").strip()
@@ -817,6 +866,7 @@ class InditexScraper(BaseScraper):
             external_id=external_id,
             title=f"{title} ({color_name})" if color_name and color_name.lower() not in title.lower() else title,
             category=inferred_category,
+            gender=inferred_gender,
             url=url,
             image_url=image_url,
             current_price=best_current_price,
@@ -904,6 +954,86 @@ class InditexScraper(BaseScraper):
     # ------------------------------------------------------------------
     # Zara AJAX engine
     # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_zara_pdp_details(
+        pdp_payload: dict[str, Any],
+        target_color_id: str = "",
+    ) -> tuple[list[str], bool, str | None, int | None]:
+        """Extract in-stock sizes, critical-stock flag, and fabric composition from Zara PDP AJAX JSON."""
+        product = pdp_payload.get("product") or {}
+        detail = product.get("detail") or {}
+        colors = detail.get("colors") or []
+
+        chosen_color: dict[str, Any] = {}
+        if target_color_id:
+            for col in colors:
+                if isinstance(col, dict) and str(col.get("id") or "") == target_color_id:
+                    chosen_color = col
+                    break
+        if not chosen_color and colors and isinstance(colors[0], dict):
+            chosen_color = colors[0]
+
+        available_sizes: list[str] = []
+        is_critical_stock = False
+        for sz in chosen_color.get("sizes") or []:
+            if not isinstance(sz, dict):
+                continue
+            avail = str(sz.get("availability") or "").strip().lower()
+            if avail in {"in_stock", "low_on_stock", "few_units"}:
+                sz_name = str(sz.get("name") or "").strip()
+                if sz_name and sz_name not in available_sizes:
+                    available_sizes.append(sz_name)
+                if avail in {"low_on_stock", "few_units"}:
+                    is_critical_stock = True
+
+        if 0 < len(available_sizes) <= 2:
+            is_critical_stock = True
+
+        # Parse Zara `detailedComposition` -> parts[*].areas[*].components or parts[*].components
+        fabric_parts: list[str] = []
+        outer_polyester: int | None = None
+        any_polyester: int | None = None
+        detailed_comp = detail.get("detailedComposition") or {}
+        if isinstance(detailed_comp, dict):
+            for idx, part in enumerate(detailed_comp.get("parts") or []):
+                if not isinstance(part, dict):
+                    continue
+                part_desc = str(part.get("description") or "").strip()
+                comps: list[dict[str, Any]] = []
+                for c in part.get("components") or []:
+                    if isinstance(c, dict):
+                        comps.append(c)
+                for area in part.get("areas") or []:
+                    if isinstance(area, dict):
+                        for c in area.get("components") or []:
+                            if isinstance(c, dict):
+                                comps.append(c)
+                fiber_strs: list[str] = []
+                for comp in comps:
+                    mat = str(comp.get("material") or "").strip()
+                    pct = str(comp.get("percentage") or "").strip()
+                    if not mat:
+                        continue
+                    digits = re.sub(r"[^\d]", "", pct)
+                    if digits:
+                        pct_int = int(digits)
+                        fiber_strs.append(f"%{pct_int} {mat}")
+                        if "polyester" in turkish_lower(mat) or "poliester" in turkish_lower(mat):
+                            if idx == 0 or "dış" in turkish_lower(part_desc) or "outer" in turkish_lower(part_desc):
+                                outer_polyester = max(outer_polyester or 0, pct_int)
+                            any_polyester = max(any_polyester or 0, pct_int)
+                    else:
+                        fiber_strs.append(mat)
+                if fiber_strs:
+                    prefix = f"{part_desc}: " if part_desc and len(detailed_comp.get("parts") or []) > 1 else ""
+                    fabric_parts.append(prefix + ", ".join(dict.fromkeys(fiber_strs)))
+
+        fabric_info = " | ".join(fabric_parts) if fabric_parts else None
+        polyester_pct = outer_polyester if outer_polyester is not None else any_polyester
+        if polyester_pct is None and fabric_info:
+            polyester_pct = extract_polyester_percent(fabric_info)
+        return available_sizes, is_critical_stock, fabric_info, polyester_pct
+
     def _fetch_zara_products(self) -> list[ProductItem]:
         cat_url = f"https://{self.config.domain}/{self.config.store_path}/categories?ajax=true"
         cat_payload = self._get_json(cat_url)
@@ -913,7 +1043,7 @@ class InditexScraper(BaseScraper):
         if not categories:
             return []
 
-        products_by_id: dict[str, ProductItem] = {}
+        raw_candidates: dict[str, tuple[dict[str, Any], _CategoryNode, float]] = {}
         category_failures = 0
 
         for idx, cat in enumerate(categories):
@@ -922,16 +1052,34 @@ class InditexScraper(BaseScraper):
             try:
                 url = f"https://{self.config.domain}/{self.config.store_path}/category/{cat.category_id}/products?ajax=true"
                 payload = self._get_json(url)
-                cat_items = self._parse_zara_category_payload(payload, cat)
-                for item in cat_items:
-                    if item.external_id not in products_by_id:
-                        products_by_id[item.external_id] = item
+                found_in_cat = 0
+                for group in payload.get("productGroups") or []:
+                    for element in group.get("elements") or []:
+                        for comp in element.get("commercialComponents") or []:
+                            if comp.get("type") != "Product":
+                                continue
+                            pid = str(comp.get("id") or "").strip()
+                            if not pid or pid in raw_candidates:
+                                continue
+                            cur_p = _cents_to_try(comp.get("price"))
+                            orig_p = _cents_to_try(comp.get("oldPrice"))
+                            if cur_p is None:
+                                continue
+                            if orig_p is not None and orig_p <= cur_p:
+                                orig_p = None
+                            if self.only_discounted and orig_p is None:
+                                continue
+                            if str(comp.get("availability") or "").lower() == "out_of_stock":
+                                continue
+                            disc_ratio = float((orig_p - cur_p) / orig_p) if orig_p and orig_p > cur_p else 0.0
+                            raw_candidates[pid] = (comp, cat, disc_ratio)
+                            found_in_cat += 1
                 logger.info(
-                    "[%s] Category %s (%d): parsed %d items",
+                    "[%s] Category %s (%d): collected %d candidates",
                     self.brand,
                     cat.name,
                     cat.category_id,
-                    len(cat_items),
+                    found_in_cat,
                 )
             except ScraperBlockedError:
                 raise
@@ -945,8 +1093,49 @@ class InditexScraper(BaseScraper):
                     exc,
                 )
 
-        if category_failures == len(categories) and not products_by_id:
+        if category_failures == len(categories) and not raw_candidates:
             raise RuntimeError(f"All {len(categories)} Zara categories failed")
+
+        # Sort by highest discount first so PDP detail budget goes to the strongest deals
+        ordered_candidates = sorted(raw_candidates.values(), key=lambda entry: -entry[2])
+        logger.info("[%s] Fetching PDP size/fabric details for up to %d of %d Zara candidates", self.brand, self.max_detail_fetches, len(ordered_candidates))
+
+        products_by_id: dict[str, ProductItem] = {}
+        detail_fetches = 0
+        pdp_blocked = False
+
+        for comp, cat, _ in ordered_candidates:
+            pdp_payload: dict[str, Any] | None = None
+            detail = comp.get("detail") or {}
+            colors = detail.get("colors") or []
+            has_inline_sizes = bool(colors and isinstance(colors[0], dict) and colors[0].get("sizes"))
+
+            if not has_inline_sizes and not pdp_blocked and self.max_detail_fetches > 0:
+                if detail_fetches >= self.max_detail_fetches:
+                    break
+                seo = comp.get("seo") or {}
+                kw = str(seo.get("keyword") or "").strip()
+                seo_pid = str(seo.get("seoProductId") or "").strip()
+                prod_id = comp.get("id")
+                if kw and seo_pid and prod_id:
+                    if detail_fetches > 0:
+                        time.sleep(random.uniform(0.25, 0.65))
+                    pdp_url = f"https://{self.config.domain}/{self.config.store_path}/{kw}-p{seo_pid}.html?v1={prod_id}&ajax=true"
+                    try:
+                        pdp_payload = self._get_json(pdp_url)
+                        detail_fetches += 1
+                    except ScraperBlockedError as exc:
+                        if not products_by_id:
+                            raise
+                        logger.warning("[%s] Zara PDP blocked after %d products (%s); stopping detail fetches.", self.brand, len(products_by_id), exc)
+                        pdp_blocked = True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("[%s] Zara PDP fetch failed for %s: %s", self.brand, prod_id, exc)
+                        continue
+
+            item = self._parse_zara_component(comp, cat, pdp_payload=pdp_payload)
+            if item is not None and item.external_id not in products_by_id:
+                products_by_id[item.external_id] = item
 
         return list(products_by_id.values())
 
@@ -970,10 +1159,14 @@ class InditexScraper(BaseScraper):
         self,
         comp: dict[str, Any],
         category: _CategoryNode,
+        *,
+        pdp_payload: dict[str, Any] | None = None,
     ) -> ProductItem | None:
         prod_id = comp.get("id")
         title = str(comp.get("name") or "").strip()
         if not prod_id or not title:
+            return None
+        if is_kids_product(title, category.path):
             return None
 
         current_price = _cents_to_try(comp.get("price"))
@@ -989,18 +1182,31 @@ class InditexScraper(BaseScraper):
         detail = comp.get("detail") or {}
         colors = detail.get("colors") or []
         color = colors[0] if colors else {}
+        color_id = str(color.get("id") or "").strip()
 
-        # Extract sizes if present on component
+        # Extract sizes and composition from PDP AJAX payload if fetched, else inline component
         available_sizes: list[str] = []
         is_critical_stock = False
-        for sz in color.get("sizes") or []:
-            avail = str(sz.get("availability") or "").lower()
-            if avail in {"in_stock", "low_on_stock"}:
-                sz_name = str(sz.get("name") or "").strip()
-                if sz_name:
-                    available_sizes.append(sz_name)
-                if avail == "low_on_stock":
-                    is_critical_stock = True
+        fabric_info: str | None = None
+        polyester_pct: int | None = None
+
+        if pdp_payload is not None:
+            (
+                available_sizes,
+                is_critical_stock,
+                fabric_info,
+                polyester_pct,
+            ) = self._extract_zara_pdp_details(pdp_payload, target_color_id=color_id)
+
+        if not available_sizes:
+            for sz in color.get("sizes") or []:
+                avail = str(sz.get("availability") or "").lower()
+                if avail in {"in_stock", "low_on_stock"}:
+                    sz_name = str(sz.get("name") or "").strip()
+                    if sz_name:
+                        available_sizes.append(sz_name)
+                    if avail == "low_on_stock":
+                        is_critical_stock = True
 
         # Extract image
         image_url: str | None = None
@@ -1025,12 +1231,20 @@ class InditexScraper(BaseScraper):
             title,
             category.path,
         )
+        inferred_gender = infer_product_gender(
+            str(comp.get("sectionName") or ""),
+            category.section_hint,
+            title,
+            category.path,
+            default=ProductGender.UNISEX,
+        )
 
         return ProductItem(
             brand=self.brand,
             external_id=str(prod_id),
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=url,
             image_url=image_url,
             current_price=current_price,
@@ -1038,6 +1252,8 @@ class InditexScraper(BaseScraper):
             currency="TRY",
             available_sizes=available_sizes,
             is_critical_stock=is_critical_stock,
+            fabric_info=fabric_info,
+            polyester_percent=polyester_pct,
             raw_metadata={
                 "category_id": category.category_id,
                 "category_path": category.path,

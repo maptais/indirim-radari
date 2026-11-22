@@ -11,7 +11,7 @@ from scraper.core.config import CategoryThreshold, UserSettings
 from scraper.core.filters import ProductFilter, match_sizes, normalize_size_tokens
 from scraper.core.http import infer_product_category, is_blocked_response, parse_try_price
 from scraper.core.notifier import BRAND_DISPLAY_NAMES
-from scraper.engines.base import ProductCategory, ScrapeStatus, ScraperBlockedError
+from scraper.engines.base import ProductCategory, ProductGender, ScrapeStatus, ScraperBlockedError
 from scraper.engines.eren import EREN_BRAND_CONFIGS, ErenScraper
 from scraper.engines.independents import (
     AdidasOutletScraper,
@@ -153,6 +153,7 @@ class TestPhase5BrandParsers(unittest.TestCase):
         assert item is not None
         self.assertEqual(item.brand, "occasion")
         self.assertEqual(item.category, ProductCategory.SHOES)
+        self.assertEqual(item.gender, ProductGender.UNISEX)
         self.assertEqual(item.available_sizes, ["42", "42,5"])
         self.assertTrue(item.is_critical_stock)
         self.assertEqual(item.fabric_info, "%100 İnek Derisi")
@@ -187,6 +188,7 @@ class TestPhase5BrandParsers(unittest.TestCase):
         assert item is not None
         self.assertEqual(item.brand, "barcin")
         self.assertEqual(item.category, ProductCategory.SHOES)
+        self.assertEqual(item.gender, ProductGender.MEN)
         self.assertTrue(self.product_filter.evaluate(item).passed)
         barcin.close()
 

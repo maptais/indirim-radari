@@ -1,6 +1,7 @@
 import type {
   CategoryThresholds,
   ProductCategory,
+  ProductGender,
   ScrapeRunMode,
 } from "@/types/database";
 
@@ -57,6 +58,16 @@ export const CATEGORY_LABELS: Record<ProductCategory, string> = {
   outerwear: "Dış Giyim",
   other: "Diğer",
 };
+
+export const GENDER_ORDER: ProductGender[] = ["men", "women", "unisex"];
+
+export const GENDER_LABELS: Record<ProductGender, string> = {
+  men: "Erkek",
+  women: "Kadın",
+  unisex: "Unisex",
+};
+
+export const DEFAULT_TARGET_GENDERS: ProductGender[] = ["men", "unisex"];
 
 export const BRAND_LABELS: Record<string, string> = {
   zara: "Zara",
@@ -133,6 +144,10 @@ export function getBrandLabel(slug: string): string {
 
 export function getCategoryLabel(category: ProductCategory | string): string {
   return CATEGORY_LABELS[category as ProductCategory] || "Diğer";
+}
+
+export function getGenderLabel(gender: ProductGender | string): string {
+  return GENDER_LABELS[gender as ProductGender] || "Unisex";
 }
 
 export function formatPriceTry(value: number | string | null | undefined): string {

@@ -12,12 +12,19 @@ from typing import Any, Literal
 from ..base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ...core.filters import turkish_lower
-from ...core.http import HttpClient, infer_product_category, parse_try_price
+from ...core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,25 +115,36 @@ class DeFactoScraper(BaseScraper):
                 docs.append(parsed)
         return docs
 
+    @staticmethod
+    def _infer_gender(doc: dict[str, Any], category_path: str) -> ProductGender:
+        persona = str(doc.get("PersonaDescriptionName") or doc.get("Persona") or "")
+        division = str(doc.get("Division") or doc.get("SubDivision") or "")
+        title = str(doc.get("Name") or "")
+        return infer_product_gender(
+            persona,
+            division,
+            title,
+            category_path,
+            default=ProductGender.UNISEX,
+        )
+
     def _matches_section(self, doc: dict[str, Any], category_path: str) -> bool:
         persona = str(doc.get("PersonaDescriptionName") or doc.get("Persona") or "")
         division = str(doc.get("Division") or doc.get("SubDivision") or "")
         title = str(doc.get("Name") or "")
-        combined = turkish_lower(f"{title} {persona} {division} {category_path}")
 
-        if any(k in combined for k in _KIDS_MARKERS):
+        if is_kids_product(title, persona, division, category_path):
             return False
         if self.section == "all":
             return True
-        if "unisex" in combined:
-            return True
 
-        is_men = "erkek" in combined or "man" in combined or "men" in combined
-        is_women = "kadın" in combined or "kadin" in combined or "woman" in combined or "women" in combined
+        gender = self._infer_gender(doc, category_path)
+        if gender == ProductGender.UNISEX:
+            return True
         if self.section == "men":
-            return is_men or not is_women
+            return gender == ProductGender.MEN
         if self.section == "women":
-            return is_women or not is_men
+            return gender == ProductGender.WOMEN
         return True
 
     def parse_document(
@@ -220,6 +238,7 @@ class DeFactoScraper(BaseScraper):
             default=ProductCategory.TOPS,
         )
 
+        inferred_gender = self._infer_gender(doc, category_path)
         external_id = str(variant_index or long_code).strip()
 
         return ProductItem(
@@ -227,6 +246,7 @@ class DeFactoScraper(BaseScraper):
             external_id=external_id,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=product_url,
             image_url=image_url,
             current_price=current_price,

@@ -204,6 +204,7 @@ class ProductFilter:
 
     def __init__(self, user_settings: UserSettings) -> None:
         self.user_settings = user_settings
+        self._target_genders = {g.strip().lower() for g in user_settings.target_genders if g.strip()}
         self._negative_keywords = [
             turkish_lower(kw.strip()) for kw in user_settings.negative_keywords if kw.strip()
         ]
@@ -214,6 +215,10 @@ class ProductFilter:
     def evaluate(self, product: ProductItem) -> FilterResult:
         """Evaluate all filter rules for a single product."""
         reasons: list[str] = []
+
+        # 0. Dynamic gender preference filter
+        if self._target_genders and product.gender.value not in self._target_genders:
+            reasons.append(f"gender_mismatch:{product.gender.value}")
 
         # 1. Price validity & category thresholds
         threshold = self.user_settings.get_threshold(product.category.value)

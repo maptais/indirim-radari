@@ -13,18 +13,38 @@ from urllib.parse import quote, urljoin
 from .base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ..core.filters import extract_polyester_percent, turkish_lower
-from ..core.http import HttpClient, infer_product_category, parse_try_price
+from ..core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
 _NEXT_F_PUSH_RE = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', re.DOTALL)
-_KIDS_MARKERS = ("çocuk", "cocuk", "kids", "niño", "nino", "niña", "nina", "bebek", "baby", "teen")
-_SALE_PATH_HINTS = ("indirim", "promosyon", "promo", "ozel-fiyat", "özel-fiyat", "sale", "outlet", "rebajas")
+_SALE_PATH_HINTS = (
+    "indirim",
+    "promosyon",
+    "promo",
+    "ozel-fiyat",
+    "özel-fiyat",
+    "sale",
+    "outlet",
+    "rebajas",
+    "black-friday",
+    "firsat",
+    "fırsat",
+    "mid-season",
+    "special-price",
+)
 
 
 def _extract_balanced_json(text: str, start_idx: int, open_ch: str, close_ch: str) -> Any | None:
@@ -323,15 +343,43 @@ class MangoScraper(BaseScraper):
             if val is not None and val > current_price:
                 original_candidates.append(val)
 
-        crossed_list = price_block.get("crossedOutPrices") or price_block.get("previousPrices") or []
-        if isinstance(crossed_list, list):
-            for entry in crossed_list:
+        crossed_raw = price_block.get("crossedOutPrices") or price_block.get("previousPrices")
+        if isinstance(crossed_raw, list):
+            for entry in crossed_raw:
                 raw_val = entry.get("price") if isinstance(entry, dict) else entry
                 val = parse_try_price(raw_val)
                 if val is not None and val > current_price:
                     original_candidates.append(val)
+        elif isinstance(crossed_raw, dict):
+            # Modern Mango RSC schema: {"previousPrices": {"originalShop": 3699.99}}
+            for raw_val in crossed_raw.values():
+                val = parse_try_price(raw_val.get("price") if isinstance(raw_val, dict) else raw_val)
+                if val is not None and val > current_price:
+                    original_candidates.append(val)
+
+        # Also check `lowestPrices` promo reference if still missing original price
+        if not original_candidates:
+            lowest_raw = price_block.get("lowestPrices")
+            if isinstance(lowest_raw, dict):
+                for key, raw_val in lowest_raw.items():
+                    if key == "discountRate":
+                        continue
+                    val = parse_try_price(raw_val)
+                    if val is not None and val > current_price:
+                        original_candidates.append(val)
 
         original_price = max(original_candidates) if original_candidates else None
+
+        # Derive original price from explicit `discountRate` if present and still missing
+        if original_price is None:
+            disc_rate = price_block.get("discountRate")
+            if isinstance(disc_rate, (int, float)) and 0 < disc_rate < 95:
+                ratio = Decimal("1") - (Decimal(str(disc_rate)) / Decimal("100"))
+                if ratio > Decimal("0"):
+                    derived = (current_price / ratio).quantize(Decimal("0.01"))
+                    if derived > current_price:
+                        original_price = derived
+
         return current_price, original_price
 
     @staticmethod
@@ -386,8 +434,7 @@ class MangoScraper(BaseScraper):
         if not title or not ref or not rel_url:
             return None
 
-        combined_check = turkish_lower(f"{title} {rel_url} {category_path}")
-        if any(k in combined_check for k in _KIDS_MARKERS):
+        if is_kids_product(title, rel_url, category_path):
             return None
 
         default_color_id = str(entry.get("defaultColorId") or "").strip()
@@ -450,6 +497,14 @@ class MangoScraper(BaseScraper):
             default=ProductCategory.TOPS,
         )
 
+        default_gender = ProductGender.MEN if self.brand == "mangoman" else ProductGender.UNISEX
+        inferred_gender = infer_product_gender(
+            title,
+            rel_url,
+            category_path,
+            default=default_gender,
+        )
+
         external_id = f"{ref}-{default_color_id}" if default_color_id else ref
 
         return ProductItem(
@@ -457,6 +512,7 @@ class MangoScraper(BaseScraper):
             external_id=external_id,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=urljoin(f"{self.base_url}/", quote(rel_url.lstrip("/"), safe="/:?=&%")),
             image_url=self._extract_image_url(product, default_color_id),
             current_price=current_price,
@@ -489,8 +545,18 @@ class MangoScraper(BaseScraper):
         for home_path in home_paths:
             try:
                 html = self.http.get_text(f"{self.base_url}{home_path}")
-            except ScraperBlockedError:
-                raise
+            except ScraperBlockedError as exc:
+                # For Mango Man on cloud IPs, homepage may return transient 429 while
+                # fallback category pages remain reachable; only re-raise for local-mode outlet.
+                if self.brand == "mangooutlet":
+                    raise
+                logger.warning(
+                    "[%s] Home discovery rate-limited on %s (%s); using fallback category paths.",
+                    self.brand,
+                    home_path,
+                    exc,
+                )
+                continue
             except Exception as exc:  # noqa: BLE001
                 logger.debug("[%s] Home discovery failed on %s: %s", self.brand, home_path, exc)
                 continue
@@ -498,6 +564,10 @@ class MangoScraper(BaseScraper):
             for match in re.findall(r'(/tr/tr/c/(?:erkek|kadin)/[^"\\\s<>]+/[a-f0-9]{6,12})', html):
                 lower_m = turkish_lower(match)
                 if match in seen:
+                    continue
+                if self.section == "men" and "/kadin/" in lower_m:
+                    continue
+                if self.section == "women" and "/erkek/" in lower_m:
                     continue
                 if any(skip in lower_m for skip in ("cuzdan", "aksesuar", "gunes-gozlugu", "ic-camas", "kravat", "canta", "pijama", "kemer", "bere", "atki", "mayo")):
                     continue

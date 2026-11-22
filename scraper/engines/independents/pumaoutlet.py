@@ -14,12 +14,19 @@ from urllib.parse import urljoin
 from ..base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ...core.filters import turkish_lower
-from ...core.http import HttpClient, infer_product_category, parse_try_price
+from ...core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +117,7 @@ class PumaOutletScraper(BaseScraper):
         only_discounted: bool = True,
         max_categories: int = 3,
         max_pages_per_category: int = 2,
-        max_detail_fetches: int = 24,
+        max_detail_fetches: int = 32,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
@@ -144,20 +151,27 @@ class PumaOutletScraper(BaseScraper):
     def close(self) -> None:
         self.http.close()
 
+    @staticmethod
+    def _infer_gender(title: str, url: str, category_path: str) -> ProductGender:
+        return infer_product_gender(
+            title,
+            url,
+            category_path,
+            default=ProductGender.UNISEX,
+        )
+
     def _matches_section(self, title: str, url: str, category_path: str) -> bool:
-        combined = turkish_lower(f"{title} {url} {category_path}")
-        if any(k in combined for k in _KIDS_MARKERS):
+        if is_kids_product(title, url, category_path):
             return False
         if self.section == "all":
             return True
-        if "unisex" in combined:
+        gender = self._infer_gender(title, url, category_path)
+        if gender == ProductGender.UNISEX:
             return True
-        is_men = "erkek" in combined
-        is_women = "kadın" in combined or "kadin" in combined
         if self.section == "men":
-            return is_men or not is_women
+            return gender == ProductGender.MEN
         if self.section == "women":
-            return is_women or not is_men
+            return gender == ProductGender.WOMEN
         return True
 
     @classmethod
@@ -301,6 +315,7 @@ class PumaOutletScraper(BaseScraper):
 
         candidates: list[_PumaListingCard] = []
         seen_urls: set[str] = set()
+        seen_ids: set[str] = set()
         cat_failures = 0
 
         for cat_idx, path in enumerate(selected_paths):
@@ -328,13 +343,14 @@ class PumaOutletScraper(BaseScraper):
 
                 new_in_page = 0
                 for card in cards:
-                    if card.url in seen_urls:
+                    if card.url in seen_urls or card.external_id in seen_ids:
                         continue
                     if not self._matches_section(card.title, card.url, path):
                         continue
                     if self.only_discounted and card.original_price is None:
                         continue
                     seen_urls.add(card.url)
+                    seen_ids.add(card.external_id)
                     candidates.append(card)
                     new_in_page += 1
 
@@ -387,12 +403,15 @@ class PumaOutletScraper(BaseScraper):
                 default=ProductCategory.SHOES,
             )
 
+            inferred_gender = self._infer_gender(card.title, card.url, card.category_path)
+
             products.append(
                 ProductItem(
                     brand=self.brand,
                     external_id=card.external_id,
                     title=card.title,
                     category=inferred_cat,
+                    gender=inferred_gender,
                     url=card.url,
                     image_url=card.image_url,
                     current_price=card.current_price,

@@ -3,6 +3,7 @@
 from .base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeResult,
     ScrapeRunMode,
@@ -33,6 +34,7 @@ __all__ = [
     "InditexBrandConfig",
     "InditexScraper",
     "ProductCategory",
+    "ProductGender",
     "ProductItem",
     "PumaOutletScraper",
     "ScrapeResult",

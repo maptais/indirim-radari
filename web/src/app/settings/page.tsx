@@ -4,9 +4,15 @@ import { SettingsForm } from "@/components/SettingsForm";
 import {
   CATEGORY_ORDER,
   DEFAULT_CATEGORY_THRESHOLDS,
+  DEFAULT_TARGET_GENDERS,
+  GENDER_ORDER,
 } from "@/lib/constants";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import type { CategoryThresholds, UserSettingsRow } from "@/types/database";
+import type {
+  CategoryThresholds,
+  ProductGender,
+  UserSettingsRow,
+} from "@/types/database";
 
 export const dynamic = "force-dynamic";
 
@@ -64,8 +70,19 @@ async function loadUserSettings(): Promise<{
       }
     }
 
+    const validGenderSet = new Set<ProductGender>(GENDER_ORDER);
+    const parsedGenders = Array.isArray(data.target_genders)
+      ? (data.target_genders
+          .map((g: unknown) => String(g).trim().toLowerCase())
+          .filter((g: string): g is ProductGender =>
+            validGenderSet.has(g as ProductGender)
+          ) as ProductGender[])
+      : [];
+
     const normalized: UserSettingsRow = {
       id: 1,
+      target_genders:
+        parsedGenders.length > 0 ? parsedGenders : [...DEFAULT_TARGET_GENDERS],
       top_sizes: Array.isArray(data.top_sizes) ? data.top_sizes : [],
       bottom_sizes: Array.isArray(data.bottom_sizes) ? data.bottom_sizes : [],
       shoe_sizes: Array.isArray(data.shoe_sizes) ? data.shoe_sizes : [],

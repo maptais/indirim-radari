@@ -3,15 +3,35 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   CATEGORY_ORDER,
   DEFAULT_CATEGORY_THRESHOLDS,
+  DEFAULT_TARGET_GENDERS,
+  GENDER_ORDER,
 } from "@/lib/constants";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import type {
   CategoryThresholds,
   ProductCategory,
+  ProductGender,
   UserSettingsRow,
 } from "@/types/database";
 
 export const dynamic = "force-dynamic";
+
+const VALID_GENDERS = new Set<ProductGender>(GENDER_ORDER);
+
+function sanitizeTargetGenders(input: unknown): ProductGender[] {
+  if (!Array.isArray(input)) return [...DEFAULT_TARGET_GENDERS];
+  const seen = new Set<ProductGender>();
+  const result: ProductGender[] = [];
+  for (const raw of input) {
+    if (typeof raw !== "string") continue;
+    const normalized = raw.trim().toLowerCase() as ProductGender;
+    if (VALID_GENDERS.has(normalized) && !seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+  return result.length > 0 ? result : [...DEFAULT_TARGET_GENDERS];
+}
 
 function sanitizeStringArray(
   input: unknown,
@@ -76,6 +96,7 @@ function sanitizeThresholds(input: unknown): CategoryThresholds {
 function normalizeSettingsRow(row: Record<string, unknown>): UserSettingsRow {
   return {
     id: 1,
+    target_genders: sanitizeTargetGenders(row.target_genders),
     top_sizes: sanitizeStringArray(row.top_sizes, (v) => v.toUpperCase()),
     bottom_sizes: sanitizeStringArray(row.bottom_sizes, (v) => v.toUpperCase()),
     shoe_sizes: sanitizeStringArray(row.shoe_sizes, (v) => v.toUpperCase()),
@@ -152,6 +173,7 @@ export async function PUT(request: NextRequest) {
 
     const payload = {
       id: 1,
+      target_genders: sanitizeTargetGenders(body.target_genders),
       top_sizes: sanitizeStringArray(body.top_sizes, (v) => v.toUpperCase()),
       bottom_sizes: sanitizeStringArray(body.bottom_sizes, (v) =>
         v.toUpperCase()

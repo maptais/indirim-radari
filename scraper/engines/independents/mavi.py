@@ -12,17 +12,23 @@ from urllib.parse import urljoin
 from ..base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ...core.filters import extract_polyester_percent, turkish_lower
-from ...core.http import HttpClient, infer_product_category, parse_try_price
+from ...core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
 _CRITICAL_STOCK_THRESHOLD = 3
-_KIDS_MARKERS = ("çocuk", "cocuk", "bebek", "baby", "kids", "junior")
 _NG_STATE_RE = re.compile(
     r'<script[^>]+id=["\']ng-state["\'][^>]*>(.*?)</script>',
     re.DOTALL | re.IGNORECASE,
@@ -30,18 +36,18 @@ _NG_STATE_RE = re.compile(
 
 MAVI_CATEGORY_PATHS: dict[str, tuple[str, ...]] = {
     "all": (
-        "/outlet/c/4?q=:relevance:gender:Erkek",
-        "/outlet/c/4?q=:relevance:gender:Kad%C4%B1n",
-        "/erkek/c/2?q=:discountRate-desc",
-        "/kadin/c/1?q=:discountRate-desc",
+        "/erkek/c/2?q=:sale",
+        "/kadin/c/1?q=:sale",
+        "/outlet/c/4?q=:sale:gender:Erkek",
+        "/outlet/c/4?q=:sale:gender:Kad%C4%B1n",
     ),
     "men": (
-        "/outlet/c/4?q=:relevance:gender:Erkek",
-        "/erkek/c/2?q=:discountRate-desc",
+        "/erkek/c/2?q=:sale",
+        "/outlet/c/4?q=:sale:gender:Erkek",
     ),
     "women": (
-        "/outlet/c/4?q=:relevance:gender:Kad%C4%B1n",
-        "/kadin/c/1?q=:discountRate-desc",
+        "/kadin/c/1?q=:sale",
+        "/outlet/c/4?q=:sale:gender:Kad%C4%B1n",
     ),
 }
 
@@ -105,7 +111,7 @@ class MaviScraper(BaseScraper):
         only_discounted: bool = True,
         max_categories: int = 4,
         max_pages_per_category: int = 2,
-        max_detail_fetches: int = 24,
+        max_detail_fetches: int = 36,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
@@ -321,22 +327,34 @@ class MaviScraper(BaseScraper):
             return f"https:{main_img}" if main_img.startswith("//") else main_img
         return None
 
-    def _matches_section(self, raw: dict[str, Any], category_path: str) -> bool:
-        combined = turkish_lower(
-            f"{raw.get('productTitle') or ''} {raw.get('name') or ''} {raw.get('gender') or ''} {category_path}"
+    @staticmethod
+    def _infer_gender(raw: dict[str, Any], category_path: str) -> ProductGender:
+        return infer_product_gender(
+            str(raw.get("gender") or ""),
+            str(raw.get("productTitle") or ""),
+            str(raw.get("name") or ""),
+            str(raw.get("url") or ""),
+            category_path,
+            default=ProductGender.UNISEX,
         )
-        if any(k in combined for k in _KIDS_MARKERS):
+
+    def _matches_section(self, raw: dict[str, Any], category_path: str) -> bool:
+        if is_kids_product(
+            str(raw.get("productTitle") or ""),
+            str(raw.get("name") or ""),
+            str(raw.get("gender") or ""),
+            category_path,
+        ):
             return False
         if self.section == "all":
             return True
-        if "unisex" in combined:
+        gender = self._infer_gender(raw, category_path)
+        if gender == ProductGender.UNISEX:
             return True
-        is_men = "erkek" in combined
-        is_women = "kadın" in combined or "kadin" in combined
         if self.section == "men":
-            return is_men or not is_women
+            return gender == ProductGender.MEN
         if self.section == "women":
-            return is_women or not is_men
+            return gender == ProductGender.WOMEN
         return True
 
     def parse_listing_product(
@@ -400,11 +418,14 @@ class MaviScraper(BaseScraper):
             default=ProductCategory.BOTTOMS if raw.get("isJean") else ProductCategory.TOPS,
         )
 
+        inferred_gender = self._infer_gender(raw, category_path)
+
         return ProductItem(
             brand=self.brand,
             external_id=code,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=urljoin(f"{self.base_url}/", rel_url.lstrip("/")),
             image_url=self._extract_image_url(raw),
             current_price=current_price,

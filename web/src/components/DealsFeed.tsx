@@ -16,11 +16,15 @@ import { PushControl } from "@/components/PushControl";
 import {
   CATEGORY_LABELS,
   CATEGORY_ORDER,
+  DEFAULT_TARGET_GENDERS,
+  GENDER_LABELS,
+  GENDER_ORDER,
   formatRelativeTimeTr,
   getBrandLabel,
 } from "@/lib/constants";
 import type {
   ProductCategory,
+  ProductGender,
   ProductRow,
   ProductsApiResponse,
 } from "@/types/database";
@@ -31,6 +35,7 @@ interface DealsFeedProps {
 }
 
 type SortKey = "discount" | "newest" | "price_asc" | "ai_score";
+type GenderFilterKey = "settings" | "all" | ProductGender;
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "discount", label: "En Yüksek İndirim" },
@@ -42,8 +47,13 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) {
   const [products, setProducts] = useState<ProductRow[]>(initialData.products);
   const [brands, setBrands] = useState<string[]>(initialData.brands);
+  const [targetGenders, setTargetGenders] = useState<ProductGender[]>(
+    initialData.targetGenders || DEFAULT_TARGET_GENDERS
+  );
   const [stats, setStats] = useState(initialData.stats);
 
+  const [selectedGender, setSelectedGender] =
+    useState<GenderFilterKey>("settings");
   const [selectedBrand, setSelectedBrand] = useState<string>("all");
   const [selectedCategory, setSelectedCategory] = useState<
     ProductCategory | "all"
@@ -58,6 +68,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
 
   const fetchProducts = useCallback(
     async (params: {
+      gender: GenderFilterKey;
       brand: string;
       category: string;
       realOnly: boolean;
@@ -68,6 +79,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
       setError(null);
       try {
         const sp = new URLSearchParams();
+        if (params.gender) sp.set("gender", params.gender);
         if (params.brand !== "all") sp.set("brand", params.brand);
         if (params.category !== "all") sp.set("category", params.category);
         if (params.realOnly) sp.set("realOnly", "true");
@@ -84,6 +96,9 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
 
         setProducts(data.products || []);
         setBrands(data.brands || []);
+        if (Array.isArray(data.targetGenders)) {
+          setTargetGenders(data.targetGenders);
+        }
         if (data.stats) setStats(data.stats);
       } catch (err) {
         setError(
@@ -106,6 +121,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
 
     const timer = window.setTimeout(() => {
       void fetchProducts({
+        gender: selectedGender,
         brand: selectedBrand,
         category: selectedCategory,
         realOnly,
@@ -116,6 +132,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
 
     return () => window.clearTimeout(timer);
   }, [
+    selectedGender,
     selectedBrand,
     selectedCategory,
     realOnly,
@@ -126,20 +143,26 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
 
   const hasActiveFilters = useMemo(
     () =>
+      selectedGender !== "settings" ||
       selectedBrand !== "all" ||
       selectedCategory !== "all" ||
       realOnly ||
       searchQuery.trim().length > 0,
-    [selectedBrand, selectedCategory, realOnly, searchQuery]
+    [selectedGender, selectedBrand, selectedCategory, realOnly, searchQuery]
   );
 
   const resetFilters = () => {
+    setSelectedGender("settings");
     setSelectedBrand("all");
     setSelectedCategory("all");
     setRealOnly(false);
     setSearchQuery("");
     setSortBy("discount");
   };
+
+  const settingsGenderSummary = targetGenders
+    .map((g) => GENDER_LABELS[g])
+    .join(" · ");
 
   return (
     <div className="flex flex-col">
@@ -166,6 +189,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
               type="button"
               onClick={() =>
                 void fetchProducts({
+                  gender: selectedGender,
                   brand: selectedBrand,
                   category: selectedCategory,
                   realOnly,
@@ -277,6 +301,52 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
                   ))}
                 </select>
               </div>
+            </div>
+          </div>
+
+          {/* Gender Chips */}
+          <div className="space-y-1.5">
+            <span className="text-[11px] font-medium text-zinc-500">
+              Cinsiyet
+            </span>
+            <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto pb-0.5">
+              <button
+                type="button"
+                onClick={() => setSelectedGender("settings")}
+                title={`Ayarlardaki tercih: ${settingsGenderSummary}`}
+                className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                  selectedGender === "settings"
+                    ? "bg-emerald-500 text-zinc-950"
+                    : "border border-white/10 bg-zinc-950/70 text-zinc-300 hover:bg-white/10"
+                }`}
+              >
+                Ayarlarım ({settingsGenderSummary})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedGender("all")}
+                className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                  selectedGender === "all"
+                    ? "bg-white text-zinc-950"
+                    : "border border-white/10 bg-zinc-950/70 text-zinc-300 hover:bg-white/10"
+                }`}
+              >
+                Tümü
+              </button>
+              {GENDER_ORDER.map((gender) => (
+                <button
+                  key={gender}
+                  type="button"
+                  onClick={() => setSelectedGender(gender)}
+                  className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                    selectedGender === gender
+                      ? "bg-emerald-500 text-zinc-950"
+                      : "border border-white/10 bg-zinc-950/70 text-zinc-300 hover:bg-white/10"
+                  }`}
+                >
+                  {GENDER_LABELS[gender]}
+                </button>
+              ))}
             </div>
           </div>
 

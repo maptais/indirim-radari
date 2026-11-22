@@ -12,17 +12,23 @@ from urllib.parse import urljoin
 from ..base import (
     BaseScraper,
     ProductCategory,
+    ProductGender,
     ProductItem,
     ScrapeRunMode,
     ScraperBlockedError,
 )
 from ...core.filters import turkish_lower
-from ...core.http import HttpClient, infer_product_category, parse_try_price
+from ...core.http import (
+    HttpClient,
+    infer_product_category,
+    infer_product_gender,
+    is_kids_product,
+    parse_try_price,
+)
 
 logger = logging.getLogger(__name__)
 
 _CRITICAL_STOCK_THRESHOLD = 3
-_KIDS_MARKERS = ("çocuk", "cocuk", "bebek", "baby", "junior", "kids", "gs ", "td ", "ps ")
 _NEXT_DATA_RE = re.compile(
     r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
     re.DOTALL | re.IGNORECASE,
@@ -30,21 +36,22 @@ _NEXT_DATA_RE = re.compile(
 
 SNEAKSUP_CATEGORY_PATHS: dict[str, tuple[str, ...]] = {
     "all": (
+        "/sneaks-out",
         "/sneaks-out-erkek",
         "/sneaks-out-kadin",
         "/erkek-ayakkabi-sneaker",
         "/kadin-ayakkabi-sneaker",
         "/erkek-ayakkabi-kosu-ayakkabisi",
-        "/basketbol-ayakkabisi",
     ),
     "men": (
         "/sneaks-out-erkek",
+        "/sneaks-out",
         "/erkek-ayakkabi-sneaker",
         "/erkek-ayakkabi-kosu-ayakkabisi",
-        "/basketbol-ayakkabisi",
     ),
     "women": (
         "/sneaks-out-kadin",
+        "/sneaks-out",
         "/kadin-ayakkabi-sneaker",
         "/kadin-ayakkabi",
     ),
@@ -64,6 +71,7 @@ class SneaksUpScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 4,
+        max_pages_per_category: int = 4,
         max_retries: int = 2,
         impersonate: str | None = None,
         timeout_seconds: int = 20,
@@ -78,6 +86,7 @@ class SneaksUpScraper(BaseScraper):
         self.section = section
         self.only_discounted = only_discounted
         self.max_categories = max(1, max_categories)
+        self.max_pages_per_category = max(1, max_pages_per_category)
 
         self.base_url = "https://www.sneaksup.com"
         self.http = HttpClient(
@@ -94,21 +103,44 @@ class SneaksUpScraper(BaseScraper):
         self.http.close()
 
     @staticmethod
-    def extract_next_data_products(html: str) -> list[dict[str, Any]]:
-        """Extract raw product dictionaries from Sneaks Up's `__NEXT_DATA__` script block."""
+    def extract_next_data_page(html: str) -> tuple[list[dict[str, Any]], bool]:
+        """Extract raw product dicts and `hasNextPage` flag from Sneaks Up's `__NEXT_DATA__`."""
         match = _NEXT_DATA_RE.search(html or "")
         if not match:
-            return []
+            return [], False
         try:
             payload = json.loads(match.group(1))
         except json.JSONDecodeError:
-            return []
+            return [], False
 
         page_props = (payload.get("props") or {}).get("pageProps") or {}
         product_list = page_props.get("productList") or {}
         products_block = product_list.get("products") or {}
         data = products_block.get("data") or []
-        return [item for item in data if isinstance(item, dict)]
+        has_next = bool(products_block.get("hasNextPage"))
+        return [item for item in data if isinstance(item, dict)], has_next
+
+    @classmethod
+    def extract_next_data_products(cls, html: str) -> list[dict[str, Any]]:
+        """Extract raw product dictionaries from Sneaks Up's `__NEXT_DATA__` script block."""
+        items, _ = cls.extract_next_data_page(html)
+        return items
+
+    @staticmethod
+    def _infer_gender(raw: dict[str, Any], path: str) -> ProductGender:
+        crumb_names = " ".join(
+            str(c.get("name") or "")
+            for c in (raw.get("breadcrumb") or raw.get("categories") or [])
+            if isinstance(c, dict)
+        )
+        return infer_product_gender(
+            str(raw.get("gender") or ""),
+            str(raw.get("productName") or ""),
+            crumb_names,
+            str(raw.get("slug") or ""),
+            path,
+            default=ProductGender.UNISEX,
+        )
 
     def _matches_section(self, raw: dict[str, Any], path: str) -> bool:
         crumb_names = " ".join(
@@ -116,19 +148,18 @@ class SneaksUpScraper(BaseScraper):
             for c in (raw.get("breadcrumb") or raw.get("categories") or [])
             if isinstance(c, dict)
         )
-        combined = turkish_lower(f"{raw.get('productName') or ''} {crumb_names} {path}")
-        if any(k in combined for k in _KIDS_MARKERS):
+        if is_kids_product(str(raw.get("productName") or ""), crumb_names, str(raw.get("slug") or ""), path):
             return False
         if self.section == "all":
             return True
-        if "unisex" in combined:
+
+        gender = self._infer_gender(raw, path)
+        if gender == ProductGender.UNISEX:
             return True
-        is_men = "erkek" in combined
-        is_women = "kadın" in combined or "kadin" in combined
         if self.section == "men":
-            return is_men or not is_women
+            return gender == ProductGender.MEN
         if self.section == "women":
-            return is_women or not is_men
+            return gender == ProductGender.WOMEN
         return True
 
     def parse_product(self, raw: dict[str, Any], *, category_path: str = "") -> ProductItem | None:
@@ -220,6 +251,7 @@ class SneaksUpScraper(BaseScraper):
             default=ProductCategory.SHOES,
         )
 
+        inferred_gender = self._infer_gender(raw, category_path)
         external_id = str(raw.get("variantId") or raw.get("productId") or raw.get("erpCode") or slug).strip()
 
         return ProductItem(
@@ -227,6 +259,7 @@ class SneaksUpScraper(BaseScraper):
             external_id=external_id,
             title=title,
             category=inferred_cat,
+            gender=inferred_gender,
             url=urljoin(f"{self.base_url}/", slug.lstrip("/")),
             image_url=image_url,
             current_price=current_price,
@@ -253,20 +286,43 @@ class SneaksUpScraper(BaseScraper):
         for idx, path in enumerate(selected_paths):
             if idx > 0:
                 self.sleep_jitter()
-            try:
-                html = self.http.get_text(f"{self.base_url}{path}")
-            except ScraperBlockedError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                failures += 1
-                logger.warning("[%s] Category %s failed: %s", self.brand, path, exc)
-                continue
 
-            raw_products = self.extract_next_data_products(html)
-            for raw_prod in raw_products:
-                item = self.parse_product(raw_prod, category_path=path)
-                if item is not None and item.external_id not in products_by_id:
-                    products_by_id[item.external_id] = item
+            cat_failed = False
+            for page_idx in range(1, self.max_pages_per_category + 1):
+                if page_idx > 1:
+                    self.sleep_jitter()
+
+                url = (
+                    f"{self.base_url}{path}"
+                    if page_idx == 1
+                    else f"{self.base_url}{path}?pageIndex={page_idx}"
+                )
+                try:
+                    html = self.http.get_text(url)
+                except ScraperBlockedError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[%s] Category %s page %d failed: %s", self.brand, path, page_idx, exc)
+                    if page_idx == 1:
+                        cat_failed = True
+                    break
+
+                raw_products, has_next_page = self.extract_next_data_page(html)
+                if not raw_products:
+                    break
+
+                new_in_page = 0
+                for raw_prod in raw_products:
+                    item = self.parse_product(raw_prod, category_path=path)
+                    if item is not None and item.external_id not in products_by_id:
+                        products_by_id[item.external_id] = item
+                        new_in_page += 1
+
+                if not has_next_page or new_in_page == 0:
+                    break
+
+            if cat_failed:
+                failures += 1
 
         if failures == len(selected_paths) and not products_by_id:
             raise RuntimeError(f"All {len(selected_paths)} Sneaks Up categories failed")
