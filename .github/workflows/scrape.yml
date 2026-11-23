@@ -3,7 +3,7 @@ name: İndirim Radarı — Otomatik Tarama
 on:
   schedule:
     # Her 2 saatte bir (UTC) otomatik çalışır
-    - cron: "0 */2 * * *"
+    - cron: "27 */2 * * *"
   workflow_dispatch:
     inputs:
       brand:
