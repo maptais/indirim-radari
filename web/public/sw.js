@@ -1,6 +1,6 @@
-/* İndirim Radarı — iOS PWA Web Push Service Worker */
+/* İndirim Radarı — iOS PWA Service Worker (Network-Only API + Network-First HTML + Web Push) */
 
-const CACHE_VERSION = "indirim-radari-v1";
+const CACHE_NAME = "indirim-radari-v2";
 const DEFAULT_ICON = "/icons/icon-192.png";
 const DEFAULT_BADGE = "/icons/icon-192.png";
 
@@ -14,12 +14,93 @@ self.addEventListener("activate", (event) => {
       const keys = await caches.keys();
       await Promise.all(
         keys
-          .filter((key) => key !== CACHE_VERSION)
+          .filter((key) => key !== CACHE_NAME)
           .map((key) => caches.delete(key))
       );
       await self.clients.claim();
     })()
   );
+});
+
+self.addEventListener("fetch", (event) => {
+  const { request } = event;
+  if (request.method !== "GET") {
+    return;
+  }
+
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch {
+    return;
+  }
+
+  // Only handle same-origin requests
+  if (url.origin !== self.location.origin) {
+    return;
+  }
+
+  // Never intercept or cache the Service Worker script itself
+  if (url.pathname === "/sw.js") {
+    return;
+  }
+
+  // Always Network-Only for all /api/* endpoints (never cache dynamic data)
+  if (url.pathname.startsWith("/api/")) {
+    event.respondWith(
+      fetch(request, { cache: "no-store" })
+    );
+    return;
+  }
+
+  // Always Network-Only for Next.js App Router RSC payloads
+  if (url.searchParams.has("_rsc") || request.headers.get("RSC") === "1") {
+    event.respondWith(
+      fetch(request, { cache: "no-store" })
+    );
+    return;
+  }
+
+  // Network-First for HTML & page navigations (fresh content online, offline fallback)
+  const acceptHeader = request.headers.get("accept") || "";
+  const isNavigation =
+    request.mode === "navigate" || acceptHeader.includes("text/html");
+
+  if (isNavigation) {
+    event.respondWith(
+      (async () => {
+        try {
+          const networkResponse = await fetch(request, { cache: "no-cache" });
+          if (
+            networkResponse &&
+            networkResponse.ok &&
+            networkResponse.type === "basic"
+          ) {
+            const cache = await caches.open(CACHE_NAME);
+            cache.put(request, networkResponse.clone()).catch(() => {});
+          }
+          return networkResponse;
+        } catch {
+          const cached = await caches.match(request);
+          if (cached) {
+            return cached;
+          }
+          const fallbackHome = await caches.match("/");
+          if (fallbackHome) {
+            return fallbackHome;
+          }
+          return new Response(
+            "Bağlantı yok. İnternet bağlantınız geldiğinde sayfayı yenileyin.",
+            {
+              status: 503,
+              headers: { "Content-Type": "text/plain; charset=utf-8" },
+            }
+          );
+        }
+      })()
+    );
+    return;
+  }
 });
 
 self.addEventListener("push", (event) => {

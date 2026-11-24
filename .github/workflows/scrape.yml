@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       brand:
-        description: "Taranacak marka(lar) veya grup: all, inditex, eren, shoes, mango, trendyol, clothing, independents veya virgülle ayrılmış liste"
+        description: "Taranacak marka(lar) veya grup: all, inditex, eren, mango, trendyol, shoes, clothing, independents, independent_clothing, independent_shoes veya virgülle ayrılmış liste"
         required: false
         default: "all"
         type: string
@@ -59,10 +59,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  scrape:
-    name: Marka Taraması & AI Puanlama
+  plan:
+    name: Tarama Gruplarını Hazırla
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.set-matrix.outputs.targets }}
+    steps:
+      - name: Matrix hedeflerini belirle
+        id: set-matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BRAND: ${{ github.event.inputs.brand || 'all' }}
+        run: |
+          BRAND_CLEAN=$(echo "$INPUT_BRAND" | tr '[:upper:]' '[:lower:]' | xargs)
+          if [ "$EVENT_NAME" = "schedule" ] || [ -z "$BRAND_CLEAN" ] || [ "$BRAND_CLEAN" = "all" ]; then
+            # 20 aktif cloud markasını çakışmasız 5 paralel gruba böl:
+            # 1) inditex (5): zara, pullandbear, bershka, lefties, massimodutti
+            # 2) eren (3): superstep, occasion, fashfed
+            # 3) mango,trendyol (3 cloud): mangoman, trendyolmilla, trendyolman
+            # 4) independent_clothing (4): hm, defacto, mavi, jackjones
+            # 5) independent_shoes (5 cloud): instreet, sneaksup, barcin, sportive, pumaoutlet
+            TARGETS='["inditex","eren","mango,trendyol","independent_clothing","independent_shoes"]'
+          else
+            TARGETS=$(jq -cn --arg b "$BRAND_CLEAN" '[$b]')
+          fi
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+          echo "Seçilen paralel tarama hedefleri: $TARGETS"
+
+  scrape:
+    name: Tarama (${{ matrix.target }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.plan.outputs.targets) }}
 
     steps:
       - name: Depoyu indir
@@ -98,7 +131,7 @@ jobs:
             echo "::warning::VAPID_PRIVATE_KEY tanımlı değil; Web Push bildirimleri atlanacak."
           fi
 
-      - name: İndirim taramasını çalıştır
+      - name: İndirim taramasını çalıştır (${{ matrix.target }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -108,7 +141,7 @@ jobs:
           VAPID_CLAIMS_SUB: ${{ secrets.VAPID_CLAIMS_SUB }}
           SCRAPER_RUN_MODE: cloud
           PYTHONUNBUFFERED: "1"
-          INPUT_BRAND: ${{ github.event.inputs.brand || 'all' }}
+          MATRIX_TARGET: ${{ matrix.target }}
           INPUT_TARGET_MODE: ${{ github.event.inputs.target_mode || 'cloud' }}
           INPUT_SECTION: ${{ github.event.inputs.section || 'auto' }}
           INPUT_MAX_CATEGORIES: ${{ github.event.inputs.max_categories || '12' }}
@@ -117,7 +150,7 @@ jobs:
           INPUT_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: |
           ARGS=(
-            "--brand" "$INPUT_BRAND"
+            "--brand" "$MATRIX_TARGET"
             "--target-mode" "$INPUT_TARGET_MODE"
             "--section" "$INPUT_SECTION"
             "--max-categories" "$INPUT_MAX_CATEGORIES"

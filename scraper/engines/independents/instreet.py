@@ -45,7 +45,7 @@ class InStreetScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 4,
-        max_pages: int = 5,
+        max_pages: int = 15,
         max_retries: int = 2,
         impersonate: str | None = None,
         timeout_seconds: int = 20,
@@ -200,9 +200,10 @@ class InStreetScraper(BaseScraper):
         if not external_id:
             return None
 
+        raw_options = raw.get("options") or []
         available_sizes: list[str] = []
         is_critical_stock = False
-        for opt in raw.get("options") or []:
+        for opt in raw_options:
             if not isinstance(opt, dict):
                 continue
             in_stock = bool(opt.get("is_in_stock"))
@@ -224,7 +225,8 @@ class InStreetScraper(BaseScraper):
             if size_val:
                 available_sizes.append(size_val)
 
-        if not available_sizes:
+        # Only discard as out-of-stock if options were provided and every single size is OOS
+        if not available_sizes and raw_options:
             return None
 
         image_url = raw.get("imageUrl") or raw.get("imageUrlVertical")
@@ -270,7 +272,7 @@ class InStreetScraper(BaseScraper):
     def fetch_products(self) -> list[ProductItem]:
         """Fetch discounted products with live size stock from In Street's JSON list API."""
         products_by_id: dict[str, ProductItem] = {}
-        pages_to_scan = min(self.max_pages, max(2, self.max_categories))
+        pages_to_scan = self.max_pages
 
         gender_param: str | None = None
         if self.section == "men":
@@ -279,6 +281,7 @@ class InStreetScraper(BaseScraper):
             gender_param = "kadin"
 
         page_failures = 0
+        consecutive_empty_pages = 0
         for page in range(1, pages_to_scan + 1):
             if page > 1:
                 self.sleep_jitter()
@@ -307,12 +310,21 @@ class InStreetScraper(BaseScraper):
             if not raw_products:
                 break
 
+            new_in_page = 0
             for raw_prod in raw_products:
                 if not isinstance(raw_prod, dict):
                     continue
                 item = self.parse_product(raw_prod)
                 if item is not None and item.external_id not in products_by_id:
                     products_by_id[item.external_id] = item
+                    new_in_page += 1
+
+            if new_in_page == 0:
+                consecutive_empty_pages += 1
+                if consecutive_empty_pages >= 2:
+                    break
+            else:
+                consecutive_empty_pages = 0
 
             pagination = payload.get("pagination") or {}
             total_pages = int(pagination.get("totalPages") or 1)

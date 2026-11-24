@@ -74,6 +74,9 @@ CREATE INDEX IF NOT EXISTS idx_products_cart_promo
 CREATE INDEX IF NOT EXISTS idx_products_active_last_seen
     ON public.products (is_active, last_seen_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_products_brand_last_seen
+    ON public.products (brand, last_seen_at);
+
 CREATE INDEX IF NOT EXISTS idx_products_real_discount_feed
     ON public.products (is_active, is_real_discount, ai_score DESC NULLS LAST, discount_percent DESC);
 

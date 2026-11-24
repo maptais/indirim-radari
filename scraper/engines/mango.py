@@ -160,8 +160,8 @@ class MangoScraper(BaseScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 5,
-        max_detail_fetches: int = 24,
+        max_categories: int = 8,
+        max_detail_fetches: int = 36,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
@@ -648,29 +648,30 @@ class MangoScraper(BaseScraper):
 
         for entry, path, _ in candidates:
             detail_html: str | None = None
-            if self.fetch_variant_details and not pdp_blocked:
-                if detail_fetches >= self.max_detail_fetches:
-                    break
+            if (
+                self.fetch_variant_details
+                and not pdp_blocked
+                and detail_fetches < self.max_detail_fetches
+            ):
                 if detail_fetches > 0:
                     self.sleep_jitter()
                 rel_url = str((entry.get("product") or {}).get("url") or "").strip()
-                if not rel_url:
-                    continue
-                pdp_url = urljoin(f"{self.base_url}/", quote(rel_url.lstrip("/"), safe="/:?=&%"))
-                try:
-                    detail_html = self.http.get_text(pdp_url)
-                    detail_fetches += 1
-                except ScraperBlockedError as exc:
-                    logger.warning(
-                        "[%s] PDP blocked by WAF (%s); falling back to listing sizes for remaining items.",
-                        self.brand,
-                        exc,
-                    )
-                    pdp_blocked = True
-                    detail_html = None
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("[%s] PDP fetch failed for %s: %s", self.brand, pdp_url, exc)
-                    detail_html = None
+                if rel_url:
+                    pdp_url = urljoin(f"{self.base_url}/", quote(rel_url.lstrip("/"), safe="/:?=&%"))
+                    try:
+                        detail_html = self.http.get_text(pdp_url)
+                        detail_fetches += 1
+                    except ScraperBlockedError as exc:
+                        logger.warning(
+                            "[%s] PDP blocked by WAF (%s); falling back to listing sizes for remaining items.",
+                            self.brand,
+                            exc,
+                        )
+                        pdp_blocked = True
+                        detail_html = None
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("[%s] PDP fetch failed for %s: %s", self.brand, pdp_url, exc)
+                        detail_html = None
 
             item = self.parse_plp_entry(
                 entry,

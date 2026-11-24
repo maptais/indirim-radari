@@ -82,6 +82,7 @@ export interface ProductsApiResponse {
     realDiscountCount: number;
     criticalStockCount: number;
     cartPromoCount: number;
+    unknownSizeCount: number;
     latestScrapedAt: string | null;
   };
 }

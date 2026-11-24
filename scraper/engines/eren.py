@@ -75,12 +75,11 @@ EREN_BRAND_CONFIGS: dict[str, AkinonBrandConfig] = {
         domain="www.superstep.com.tr",
         category_paths={
             "all": ("/indirim/", "/erkek-ayakkabi/", "/kadin-ayakkabi/", "/erkek-giyim/", "/kadin-giyim/"),
-            "men": ("/erkek-ayakkabi/", "/indirim/", "/erkek-giyim/"),
-            "women": ("/kadin-ayakkabi/", "/indirim/", "/kadin-giyim/"),
+            "men": ("/indirim/", "/erkek-ayakkabi/", "/erkek-giyim/"),
+            "women": ("/indirim/", "/kadin-ayakkabi/", "/kadin-giyim/"),
         },
-        # `default` surfaces popular in-stock items with fuller size runs rather than
-        # 85%-off single-XS clearance leftovers that `number` puts at the top.
-        default_sorter="default",
+        # `number` is SuperStep's native "İndirim Oranına Göre" (highest discount first) sorter.
+        default_sorter="number",
         default_category=ProductCategory.SHOES,
     ),
     "occasion": AkinonBrandConfig(
@@ -122,7 +121,7 @@ class AkinonScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 4,
-        max_pages_per_category: int = 2,
+        max_pages_per_category: int = 10,
         max_detail_fetches: int = 48,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
@@ -565,6 +564,7 @@ class AkinonScraper(BaseScraper):
                 self.sleep_jitter()
 
             cat_failed = False
+            consecutive_empty_pages = 0
             for page in range(1, self.max_pages_per_category + 1):
                 if page > 1:
                     self.sleep_jitter()
@@ -584,6 +584,7 @@ class AkinonScraper(BaseScraper):
                 if not raw_products:
                     break
 
+                new_in_page = 0
                 for raw_prod in raw_products:
                     if not isinstance(raw_prod, dict):
                         continue
@@ -605,6 +606,14 @@ class AkinonScraper(BaseScraper):
 
                     seen_urls.add(abs_url)
                     candidates.append((raw_prod, path))
+                    new_in_page += 1
+
+                if new_in_page == 0:
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
 
                 pagination = payload.get("pagination") or {}
                 num_pages = int(pagination.get("num_pages") or 1)
@@ -646,10 +655,15 @@ class AkinonScraper(BaseScraper):
 
         products_by_id: dict[str, ProductItem] = {}
         detail_fetches = 0
+        detail_blocked = False
 
         for raw_prod, path in candidates:
             detail_payload: dict[str, Any] | None = None
-            if self.fetch_variant_details and detail_fetches < self.max_detail_fetches:
+            if (
+                self.fetch_variant_details
+                and not detail_blocked
+                and detail_fetches < self.max_detail_fetches
+            ):
                 abs_url = str(raw_prod.get("absolute_url") or "")
                 if detail_fetches > 0:
                     # Polite shorter jitter between detail calls
@@ -657,12 +671,18 @@ class AkinonScraper(BaseScraper):
                 try:
                     detail_payload = self.http.get_json(self._build_detail_url(abs_url))
                     detail_fetches += 1
-                except ScraperBlockedError:
-                    raise
+                except ScraperBlockedError as exc:
+                    if not products_by_id:
+                        raise
+                    logger.warning(
+                        "[%s] Detail fetch blocked after %d products (%s); continuing with listing fallback.",
+                        self.brand,
+                        len(products_by_id),
+                        exc,
+                    )
+                    detail_blocked = True
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("[%s] Detail fetch failed for %s, using listing fallback: %s", self.brand, abs_url, exc)
-            elif self.fetch_variant_details and detail_fetches >= self.max_detail_fetches:
-                break
 
             item = self.parse_listing_product(
                 raw_prod,
@@ -687,8 +707,8 @@ class ErenScraper(AkinonScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 4,
-        max_pages_per_category: int = 2,
-        max_detail_fetches: int = 36,
+        max_pages_per_category: int = 10,
+        max_detail_fetches: int = 48,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,

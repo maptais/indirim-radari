@@ -341,8 +341,9 @@ class InditexScraper(BaseScraper):
         only_discounted: bool = True,
         include_regular_categories: bool = False,
         max_categories: int = 12,
-        max_detail_fetches: int = 36,
-        batch_size: int = 30,
+        max_detail_fetches: int = 60,
+        batch_size: int = 50,
+        max_batches_per_category: int = 15,
         max_retries: int = 2,
         impersonate: str | None = None,
         timeout_seconds: int = 20,
@@ -370,6 +371,7 @@ class InditexScraper(BaseScraper):
         self.max_categories = max(1, max_categories)
         self.max_detail_fetches = max(0, max_detail_fetches)
         self.batch_size = max(5, min(50, batch_size))
+        self.max_batches_per_category = max(1, max_batches_per_category)
         self.max_retries = max(0, max_retries)
         self._impersonate = impersonate or random.choice(("chrome131", "chrome124"))
         self._ca_bundle = get_safe_ca_bundle()
@@ -698,7 +700,9 @@ class InditexScraper(BaseScraper):
             return []
 
         items: list[ProductItem] = []
-        for offset in range(0, len(product_ids), self.batch_size):
+        consecutive_empty_batches = 0
+        max_items = self.batch_size * self.max_batches_per_category
+        for offset in range(0, min(len(product_ids), max_items), self.batch_size):
             chunk = product_ids[offset : offset + self.batch_size]
             ids_csv = ",".join(str(pid) for pid in chunk)
 
@@ -712,15 +716,24 @@ class InditexScraper(BaseScraper):
             arr_data = self._get_json(arr_url)
             raw_products = arr_data.get("products") or []
             if not raw_products:
-                continue
+                break
 
             # Fetch live SKU stock availability for this batch
             stock_map = self._fetch_itxrest_batch_stock(chunk)
 
+            parsed_in_batch = 0
             for raw_prod in raw_products:
                 parsed = self._parse_itxrest_product(raw_prod, category, stock_map)
                 if parsed is not None:
                     items.append(parsed)
+                    parsed_in_batch += 1
+
+            if parsed_in_batch == 0:
+                consecutive_empty_batches += 1
+                if consecutive_empty_batches >= 2:
+                    break
+            else:
+                consecutive_empty_batches = 0
 
         return items
 
@@ -1112,9 +1125,12 @@ class InditexScraper(BaseScraper):
             colors = detail.get("colors") or []
             has_inline_sizes = bool(colors and isinstance(colors[0], dict) and colors[0].get("sizes"))
 
-            if not has_inline_sizes and not pdp_blocked and self.max_detail_fetches > 0:
-                if detail_fetches >= self.max_detail_fetches:
-                    break
+            if (
+                not has_inline_sizes
+                and not pdp_blocked
+                and self.max_detail_fetches > 0
+                and detail_fetches < self.max_detail_fetches
+            ):
                 seo = comp.get("seo") or {}
                 kw = str(seo.get("keyword") or "").strip()
                 seo_pid = str(seo.get("seoProductId") or "").strip()
@@ -1129,11 +1145,10 @@ class InditexScraper(BaseScraper):
                     except ScraperBlockedError as exc:
                         if not products_by_id:
                             raise
-                        logger.warning("[%s] Zara PDP blocked after %d products (%s); stopping detail fetches.", self.brand, len(products_by_id), exc)
+                        logger.warning("[%s] Zara PDP blocked after %d products (%s); continuing with listing fallback.", self.brand, len(products_by_id), exc)
                         pdp_blocked = True
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("[%s] Zara PDP fetch failed for %s: %s", self.brand, prod_id, exc)
-                        continue
 
             item = self._parse_zara_component(comp, cat, pdp_payload=pdp_payload)
             if item is not None and item.external_id not in products_by_id:

@@ -368,7 +368,7 @@ export function SettingsForm({
 
               <ChipInput
                 label="Üst Giyim ve Dış Giyim Bedenleri"
-                helper="Stokta yalnızca bu bedenlerden biri varsa ürün kaydedilir."
+                helper="Web Push bildirimleri ve 'Bedenime Uygun' filtresi bu bedenlere göre çalışır."
                 values={settings.top_sizes}
                 onChange={(top_sizes) => setSettings({ ...settings, top_sizes })}
                 placeholder="Örn: M, L (Enter ile ekle)"
@@ -463,7 +463,7 @@ export function SettingsForm({
                   className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-zinc-800 accent-emerald-500"
                 />
                 <p className="text-[11px] text-zinc-400">
-                  Polyester yüzdesi bu değerin üstündeki ürünler taramada elenir.
+                  Polyester yüzdesi bu değerin üstündeki ürünler Web Push bildirimlerinde elenir.
                 </p>
               </div>
             </section>

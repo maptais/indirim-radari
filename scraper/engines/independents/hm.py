@@ -70,8 +70,8 @@ class HMScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 4,
-        max_pages_per_category: int = 3,
-        page_size: int = 48,
+        max_pages_per_category: int = 10,
+        page_size: int = 72,
         max_retries: int = 2,
         impersonate: str | None = None,
         timeout_seconds: int = 20,
@@ -253,7 +253,10 @@ class HMScraper(BaseScraper):
             return None
 
         available_sizes, is_critical_stock = self._extract_sizes(raw)
-        if not available_sizes:
+        raw_sizes_list = raw.get("sizes") or []
+        stock_state = str(availability.get("stockState") or "").strip().lower()
+        # Only discard as sold out when API explicitly returned size entries and none are in stock
+        if not available_sizes and (raw_sizes_list or stock_state == "outofstock"):
             return None
 
         image_url: str | None = None
@@ -310,6 +313,7 @@ class HMScraper(BaseScraper):
                 self.sleep_jitter()
 
             spec_failed = False
+            consecutive_empty_pages = 0
             for page in range(1, self.max_pages_per_category + 1):
                 if page > 1:
                     self.sleep_jitter()
@@ -342,12 +346,21 @@ class HMScraper(BaseScraper):
                 if not raw_products:
                     break
 
+                new_in_page = 0
                 for raw_prod in raw_products:
                     if not isinstance(raw_prod, dict):
                         continue
                     item = self.parse_product(raw_prod, category_id=category_id)
                     if item is not None and item.external_id not in products_by_id:
                         products_by_id[item.external_id] = item
+                        new_in_page += 1
+
+                if new_in_page == 0:
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
 
                 pagination = payload.get("pagination") or {}
                 total_pages = int(pagination.get("totalPages") or 1)

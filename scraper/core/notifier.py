@@ -17,6 +17,7 @@ from pywebpush import WebPushException, webpush
 
 from .config import AppSettings, UserSettings, get_settings
 from .db import DatabaseClient
+from .filters import ProductFilter
 from .price_analyzer import PriceAnalysis
 from ..engines.base import ProductItem
 
@@ -192,6 +193,10 @@ class PushNotifier:
 
         if user_settings.target_genders and product.gender.value not in user_settings.target_genders:
             return False, f"gender_mismatch:{product.gender.value}"
+
+        strict_result = ProductFilter(user_settings).evaluate(product)
+        if not strict_result.passed:
+            return False, f"strict_filter:{','.join(strict_result.reasons)}"
 
         if not analysis.is_real_discount:
             return False, "not_real_discount"

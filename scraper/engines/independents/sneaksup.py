@@ -73,7 +73,7 @@ class SneaksUpScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 4,
-        max_pages_per_category: int = 4,
+        max_pages_per_category: int = 12,
         max_retries: int = 2,
         impersonate: str | None = None,
         timeout_seconds: int = 20,
@@ -234,9 +234,10 @@ class SneaksUpScraper(BaseScraper):
         if self.only_discounted and original_price is None and cart_price is None:
             return None
 
+        raw_variants = raw.get("variants") or []
         available_sizes: list[str] = []
         is_critical_stock = False
-        for var in raw.get("variants") or []:
+        for var in raw_variants:
             if not isinstance(var, dict):
                 continue
             qty_raw = var.get("quantity")
@@ -259,7 +260,8 @@ class SneaksUpScraper(BaseScraper):
             if size_val:
                 available_sizes.append(size_val)
 
-        if not available_sizes:
+        # Only discard as out-of-stock if listing explicitly supplied variants and all had qty <= 0
+        if not available_sizes and raw_variants:
             return None
 
         image_url: str | None = None
@@ -321,6 +323,7 @@ class SneaksUpScraper(BaseScraper):
                 self.sleep_jitter()
 
             cat_failed = False
+            consecutive_empty_pages = 0
             for page_idx in range(1, self.max_pages_per_category + 1):
                 if page_idx > 1:
                     self.sleep_jitter()
@@ -351,8 +354,14 @@ class SneaksUpScraper(BaseScraper):
                         products_by_id[item.external_id] = item
                         new_in_page += 1
 
-                if not has_next_page or new_in_page == 0:
+                if not has_next_page:
                     break
+                if new_in_page == 0:
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
 
             if cat_failed:
                 failures += 1

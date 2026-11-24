@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { DEFAULT_TARGET_GENDERS, GENDER_ORDER } from "@/lib/constants";
+import { matchesUserSizes } from "@/lib/size-match";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import type {
   ProductCategory,
@@ -10,6 +11,13 @@ import type {
 } from "@/types/database";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+const NO_CACHE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
+} as const;
 
 const VALID_CATEGORIES = new Set<ProductCategory>([
   "shoes",
@@ -38,6 +46,11 @@ function normalizeTargetGenders(raw: unknown): ProductGender[] {
     }
   }
   return result.length > 0 ? result : [...DEFAULT_TARGET_GENDERS];
+}
+
+function normalizeSizeArray(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => String(item ?? "").trim().toUpperCase()).filter(Boolean);
 }
 
 function getEffectivePrice(item: ProductRow): number {
@@ -120,6 +133,16 @@ function normalizeNumericProduct(row: Record<string, unknown>): ProductRow {
   };
 }
 
+function getTargetSizesForCategory(
+  category: ProductCategory,
+  sizes: { topSizes: string[]; bottomSizes: string[]; shoeSizes: string[] }
+): string[] {
+  if (category === "shoes") return sizes.shoeSizes;
+  if (category === "bottoms") return sizes.bottomSizes;
+  if (category === "tops" || category === "outerwear") return sizes.topSizes;
+  return [...sizes.topSizes, ...sizes.bottomSizes, ...sizes.shoeSizes];
+}
+
 export async function GET(request: NextRequest) {
   try {
     const supabase = getSupabaseAdmin();
@@ -130,12 +153,16 @@ export async function GET(request: NextRequest) {
     const genderParam = (searchParams.get("gender") || "settings").trim().toLowerCase();
     const realOnly = searchParams.get("realOnly") === "true";
     const cartOnly = searchParams.get("cartOnly") === "true";
+    const hideUnknownSizes = searchParams.get("hideUnknownSizes") === "true";
+    const mySizesOnly = searchParams.get("mySizesOnly") === "true";
     const sortParam = (searchParams.get("sort") || "discount").trim().toLowerCase();
     const queryText = (searchParams.get("q") || "").trim().toLowerCase();
 
-    // Fetch all active products + user gender preference + latest scrape log
+    const needsBrandQuery = Boolean(brandParam && brandParam !== "all");
+
     const [
       { data: rawProducts, error: productsError },
+      { data: brandScopedRaw },
       { data: latestLogs },
       { data: userSettingsRow },
     ] = await Promise.all([
@@ -145,7 +172,17 @@ export async function GET(request: NextRequest) {
         .eq("is_active", true)
         .order("discount_percent", { ascending: false })
         .order("last_seen_at", { ascending: false })
-        .limit(500),
+        .limit(1000),
+      needsBrandQuery
+        ? supabase
+            .from("products")
+            .select("*")
+            .eq("is_active", true)
+            .eq("brand", brandParam)
+            .order("discount_percent", { ascending: false })
+            .order("last_seen_at", { ascending: false })
+            .limit(1000)
+        : Promise.resolve({ data: null }),
       supabase
         .from("scrape_logs")
         .select("finished_at, started_at")
@@ -153,7 +190,7 @@ export async function GET(request: NextRequest) {
         .limit(1),
       supabase
         .from("user_settings")
-        .select("target_genders")
+        .select("target_genders, top_sizes, bottom_sizes, shoe_sizes")
         .eq("id", 1)
         .limit(1)
         .maybeSingle(),
@@ -162,35 +199,46 @@ export async function GET(request: NextRequest) {
     if (productsError) {
       return NextResponse.json(
         { error: "Ürünler veritabanından alınamadı.", details: productsError.message },
-        { status: 500 }
+        { status: 500, headers: NO_CACHE_HEADERS }
       );
     }
 
     const targetGenders = normalizeTargetGenders(userSettingsRow?.target_genders);
+    const userSizes = {
+      topSizes: normalizeSizeArray(userSettingsRow?.top_sizes),
+      bottomSizes: normalizeSizeArray(userSettingsRow?.bottom_sizes),
+      shoeSizes: normalizeSizeArray(userSettingsRow?.shoe_sizes),
+    };
+
     const allActive = (rawProducts || []).map((row) =>
       normalizeNumericProduct(row as Record<string, unknown>)
     );
 
-    // Apply gender scope before computing dashboard stats & brand chips
-    let genderScoped = allActive;
-    if (genderParam === "settings" || genderParam === "") {
-      const allowed = new Set<ProductGender>(targetGenders);
-      genderScoped = allActive.filter((item) => allowed.has(item.gender));
-    } else if (genderParam !== "all") {
-      const requested = genderParam
-        .split(",")
-        .map((g) => g.trim().toLowerCase())
-        .filter((g): g is ProductGender => VALID_GENDERS.has(g as ProductGender));
-      if (requested.length > 0) {
-        const allowed = new Set<ProductGender>(requested);
-        genderScoped = allActive.filter((item) => allowed.has(item.gender));
+    const applyGenderScope = (items: ProductRow[]): ProductRow[] => {
+      if (genderParam === "settings" || genderParam === "") {
+        const allowed = new Set<ProductGender>(targetGenders);
+        return items.filter((item) => allowed.has(item.gender));
       }
-    }
+      if (genderParam !== "all") {
+        const requested = genderParam
+          .split(",")
+          .map((g) => g.trim().toLowerCase())
+          .filter((g): g is ProductGender => VALID_GENDERS.has(g as ProductGender));
+        if (requested.length > 0) {
+          const allowed = new Set<ProductGender>(requested);
+          return items.filter((item) => allowed.has(item.gender));
+        }
+      }
+      return items;
+    };
+
+    const genderScoped = applyGenderScope(allActive);
 
     const brandsSet = new Set<string>();
     let realDiscountCount = 0;
     let criticalStockCount = 0;
     let cartPromoCount = 0;
+    let unknownSizeCount = 0;
     let latestProductSeen: string | null = null;
 
     for (const item of genderScoped) {
@@ -198,6 +246,7 @@ export async function GET(request: NextRequest) {
       if (item.is_real_discount) realDiscountCount += 1;
       if (item.is_critical_stock) criticalStockCount += 1;
       if (item.cart_price !== null || item.promo_badge) cartPromoCount += 1;
+      if (item.available_sizes.length === 0) unknownSizeCount += 1;
       if (
         item.last_seen_at &&
         (!latestProductSeen || item.last_seen_at > latestProductSeen)
@@ -208,8 +257,16 @@ export async function GET(request: NextRequest) {
 
     let filtered = genderScoped;
 
-    if (brandParam && brandParam !== "all") {
-      filtered = filtered.filter((item) => item.brand === brandParam);
+    if (needsBrandQuery) {
+      if (Array.isArray(brandScopedRaw)) {
+        const brandItems = brandScopedRaw.map((row) =>
+          normalizeNumericProduct(row as Record<string, unknown>)
+        );
+        filtered = applyGenderScope(brandItems);
+        if (brandItems.length > 0) brandsSet.add(brandParam);
+      } else {
+        filtered = filtered.filter((item) => item.brand === brandParam);
+      }
     }
 
     if (
@@ -228,6 +285,23 @@ export async function GET(request: NextRequest) {
       filtered = filtered.filter(
         (item) => item.cart_price !== null || Boolean(item.promo_badge)
       );
+    }
+
+    if (hideUnknownSizes) {
+      filtered = filtered.filter((item) => item.available_sizes.length > 0);
+    }
+
+    // When filtering by user's sizes, unknown-size products remain visible by default
+    // (marked as "Beden sitede kontrol") unless `hideUnknownSizes` is explicitly active.
+    if (mySizesOnly) {
+      filtered = filtered.filter((item) => {
+        if (item.available_sizes.length === 0) {
+          return !hideUnknownSizes;
+        }
+        const targets = getTargetSizesForCategory(item.category, userSizes);
+        if (targets.length === 0) return true;
+        return matchesUserSizes(item.available_sizes, targets, item.category);
+      });
     }
 
     if (queryText) {
@@ -282,16 +356,17 @@ export async function GET(request: NextRequest) {
         realDiscountCount,
         criticalStockCount,
         cartPromoCount,
+        unknownSizeCount,
         latestScrapedAt,
       },
     };
 
-    return NextResponse.json(payload);
+    return NextResponse.json(payload, { headers: NO_CACHE_HEADERS });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Bilinmeyen sunucu hatası";
     return NextResponse.json(
       { error: "İndirim akışı yüklenirken bir hata oluştu.", details: message },
-      { status: 500 }
+      { status: 500, headers: NO_CACHE_HEADERS }
     );
   }
 }

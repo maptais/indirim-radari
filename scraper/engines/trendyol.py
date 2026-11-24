@@ -121,9 +121,9 @@ class TrendyolScraper(BaseScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 4,
-        max_pages_per_category: int = 2,
-        max_detail_fetches: int = 24,
+        max_categories: int = 5,
+        max_pages_per_category: int = 10,
+        max_detail_fetches: int = 36,
         fetch_variant_details: bool = True,
         max_retries: int = 3,
         impersonate: str | None = None,
@@ -511,6 +511,7 @@ class TrendyolScraper(BaseScraper):
                 self.sleep_jitter()
 
             cat_failed = False
+            consecutive_empty_pages = 0
             for page in range(1, self.max_pages_per_category + 1):
                 if page > 1:
                     self.sleep_jitter()
@@ -530,6 +531,7 @@ class TrendyolScraper(BaseScraper):
                 if not raw_products:
                     break
 
+                new_in_page = 0
                 for raw_prod in raw_products:
                     pid = str(raw_prod.get("id") or raw_prod.get("contentId") or "").strip()
                     if not pid or pid in seen_ids:
@@ -547,6 +549,14 @@ class TrendyolScraper(BaseScraper):
                     disc_ratio = float((ref_orig - eff_p) / ref_orig) if ref_orig > eff_p else 0.0
                     seen_ids.add(pid)
                     candidates.append((raw_prod, path, disc_ratio))
+                    new_in_page += 1
+
+                if new_in_page == 0:
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
 
             if cat_failed:
                 cat_failures += 1
@@ -568,32 +578,33 @@ class TrendyolScraper(BaseScraper):
 
         for raw_prod, path, _ in candidates:
             detail_html: str | None = None
-            if self.fetch_variant_details and not pdp_blocked:
-                if detail_fetches >= self.max_detail_fetches:
-                    break
+            if (
+                self.fetch_variant_details
+                and not pdp_blocked
+                and detail_fetches < self.max_detail_fetches
+            ):
                 if detail_fetches > 0:
                     self.sleep_jitter()
                 rel_url = str(raw_prod.get("url") or "").strip()
-                if not rel_url:
-                    continue
-                pdp_url = urljoin(f"{self.base_url}/", rel_url.lstrip("/"))
-                try:
-                    detail_html = self.http.get_text(pdp_url)
-                    detail_fetches += 1
-                except ScraperBlockedError as exc:
-                    if not products:
-                        raise
-                    logger.warning(
-                        "[%s] PDP blocked after %d products (%s); stopping detail fetches gracefully.",
-                        self.brand,
-                        len(products),
-                        exc,
-                    )
-                    pdp_blocked = True
-                    detail_html = None
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("[%s] Detail fetch failed for %s: %s", self.brand, pdp_url, exc)
-                    continue
+                if rel_url:
+                    pdp_url = urljoin(f"{self.base_url}/", rel_url.lstrip("/"))
+                    try:
+                        detail_html = self.http.get_text(pdp_url)
+                        detail_fetches += 1
+                    except ScraperBlockedError as exc:
+                        if not products:
+                            raise
+                        logger.warning(
+                            "[%s] PDP blocked after %d products (%s); continuing with listing fallback.",
+                            self.brand,
+                            len(products),
+                            exc,
+                        )
+                        pdp_blocked = True
+                        detail_html = None
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("[%s] Detail fetch failed for %s: %s", self.brand, pdp_url, exc)
+                        detail_html = None
 
             item = self.parse_listing_product(
                 raw_prod,

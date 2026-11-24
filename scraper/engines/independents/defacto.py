@@ -39,14 +39,24 @@ _CRITICAL_STOCK_THRESHOLD = 3
 
 DEFACTO_CATEGORY_PATHS: dict[str, tuple[str, ...]] = {
     "all": (
+        "/indirim/erkek-net-yuzde-50",
+        "/indirim/kadin-net-yuzde-50",
         "/erkek-indirimli-urunler",
         "/kadin-indirimli-urunler",
+        "/indirim/erkek-firsat-fiyatlar",
+        "/indirim/kadin-firsat-fiyatlar",
+        "/erkek-outlet",
     ),
     "men": (
+        "/indirim/erkek-net-yuzde-50",
         "/erkek-indirimli-urunler",
+        "/indirim/erkek-firsat-fiyatlar",
+        "/erkek-outlet",
     ),
     "women": (
+        "/indirim/kadin-net-yuzde-50",
         "/kadin-indirimli-urunler",
+        "/indirim/kadin-firsat-fiyatlar",
     ),
 }
 
@@ -55,8 +65,8 @@ class DeFactoScraper(BaseScraper):
     """Standalone scraper for DeFacto Turkey (`www.defacto.com.tr`).
 
     Parses embedded `data-documents` JSON payloads directly from DeFacto's SSR
-    discounted category pages, which include list/campaign prices and in-stock
-    sizes in a single request per page.
+    discounted & outlet category pages, which include list/campaign prices and
+    in-stock sizes in a single request per page.
     """
 
     brand = "defacto"
@@ -68,8 +78,8 @@ class DeFactoScraper(BaseScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 2,
-        max_pages_per_category: int = 3,
+        max_categories: int = 8,
+        max_pages_per_category: int = 12,
         max_retries: int = 2,
         impersonate: str | None = None,
         timeout_seconds: int = 20,
@@ -216,11 +226,14 @@ class DeFactoScraper(BaseScraper):
         available_sizes: list[str] = []
         is_critical_stock = False
         raw_sizes = doc.get("Sizes") or []
+        saw_explicit_sizes = False
         if isinstance(raw_sizes, list):
             for size_entry in raw_sizes:
                 if not isinstance(size_entry, dict):
                     continue
                 size_name = str(size_entry.get("SizeName") or "").strip()
+                if size_name:
+                    saw_explicit_sizes = True
                 stock_qty_raw = size_entry.get("StockQuantity")
                 qty: int | None = None
                 if stock_qty_raw is not None:
@@ -240,7 +253,9 @@ class DeFactoScraper(BaseScraper):
             if fallback_size:
                 available_sizes.append(fallback_size)
 
-        if not available_sizes:
+        # Only drop as sold out when listing explicitly provided sizes and all had qty <= 0.
+        # Keep products whose listing omitted size metadata (`available_sizes=[]`).
+        if not available_sizes and saw_explicit_sizes:
             return None
 
         if 0 < len(available_sizes) <= 1:
@@ -311,11 +326,13 @@ class DeFactoScraper(BaseScraper):
                 self.sleep_jitter()
 
             cat_failed = False
+            consecutive_empty_pages = 0
             for page in range(1, self.max_pages_per_category + 1):
                 if page > 1:
                     self.sleep_jitter()
 
-                url = f"{self.base_url}{path}?page={page}"
+                sep = "&" if "?" in path else "?"
+                url = f"{self.base_url}{path}{sep}page={page}"
                 try:
                     page_html = self.http.get_text(url)
                 except ScraperBlockedError:
@@ -338,7 +355,11 @@ class DeFactoScraper(BaseScraper):
                         new_in_page += 1
 
                 if new_in_page == 0:
-                    break
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
 
             if cat_failed:
                 cat_failures += 1

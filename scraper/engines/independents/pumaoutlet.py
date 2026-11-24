@@ -124,8 +124,8 @@ class PumaOutletScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 3,
-        max_pages_per_category: int = 2,
-        max_detail_fetches: int = 32,
+        max_pages_per_category: int = 10,
+        max_detail_fetches: int = 40,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
@@ -341,10 +341,16 @@ class PumaOutletScraper(BaseScraper):
                 self.sleep_jitter()
 
             cat_failed = False
+            consecutive_empty_pages = 0
             for page in range(1, self.max_pages_per_category + 1):
                 if page > 1:
                     self.sleep_jitter()
-                url = f"{self.base_url}{path}" if page == 1 else f"{self.base_url}{path}?p={page}"
+                base_qs = "product_list_order=discount&product_list_dir=desc"
+                url = (
+                    f"{self.base_url}{path}?{base_qs}"
+                    if page == 1
+                    else f"{self.base_url}{path}?{base_qs}&p={page}"
+                )
                 try:
                     page_html = self.http.get_text(url)
                 except ScraperBlockedError:
@@ -373,7 +379,11 @@ class PumaOutletScraper(BaseScraper):
                     new_in_page += 1
 
                 if new_in_page == 0:
-                    break
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
 
             if cat_failed:
                 cat_failures += 1
@@ -391,27 +401,40 @@ class PumaOutletScraper(BaseScraper):
 
         products: list[ProductItem] = []
         detail_fetches = 0
+        pdp_blocked = False
 
         for card in candidates:
             available_sizes: list[str] = []
             is_critical_stock = False
+            detail_fetched = False
 
-            if self.fetch_variant_details:
-                if detail_fetches >= self.max_detail_fetches:
-                    break
+            if (
+                self.fetch_variant_details
+                and not pdp_blocked
+                and detail_fetches < self.max_detail_fetches
+            ):
                 if detail_fetches > 0:
                     self.sleep_jitter()
                 try:
                     detail_html = self.http.get_text(card.url)
                     detail_fetches += 1
+                    detail_fetched = True
                     available_sizes, is_critical_stock = self.extract_sizes_from_detail_html(detail_html)
-                except ScraperBlockedError:
-                    raise
+                except ScraperBlockedError as exc:
+                    if not products:
+                        raise
+                    logger.warning(
+                        "[%s] PDP blocked after %d products (%s); continuing with listing fallback.",
+                        self.brand,
+                        len(products),
+                        exc,
+                    )
+                    pdp_blocked = True
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("[%s] Detail fetch failed for %s: %s", self.brand, card.url, exc)
-                    continue
 
-            if self.fetch_variant_details and not available_sizes:
+            # Skip only when PDP was actually fetched and confirmed zero sizes in stock
+            if detail_fetched and not available_sizes:
                 continue
 
             inferred_cat = infer_product_category(

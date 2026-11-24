@@ -73,6 +73,8 @@ BRAND_GROUPS: dict[str, tuple[str, ...]] = {
         + tuple(INDEPENDENT_CLOTHING_SCRAPERS.keys())
     ),
     "independents": tuple(INDEPENDENT_SCRAPERS.keys()),
+    "independent_shoes": tuple(INDEPENDENT_SHOE_SCRAPERS.keys()),
+    "independent_clothing": tuple(INDEPENDENT_CLOTHING_SCRAPERS.keys()),
 }
 
 SUPPORTED_BRANDS: tuple[str, ...] = (
@@ -242,8 +244,8 @@ def _build_scraper(
             include_regular_categories=include_regular,
             max_categories=max_categories,
             timeout_seconds=timeout,
-            min_jitter_seconds=min_jitter,
-            max_jitter_seconds=max_jitter,
+            min_jitter_seconds=min(min_jitter, 0.5),
+            max_jitter_seconds=min(max_jitter, 1.2),
         )
 
     if brand in EREN_BRAND_CONFIGS:
@@ -299,6 +301,7 @@ def _print_brand_report(
     status: ScrapeStatus,
     fetched_count: int,
     filter_summary: FilterBatchSummary,
+    strict_matched_count: int = 0,
     matched_entries: list[tuple[ProductItem, FilterResult, PriceAnalysis, int | None, str | None]],
     saved_count: int,
     ai_scored_count: int,
@@ -316,9 +319,9 @@ def _print_brand_report(
     if error_message:
         print(f"  Hata/Not: {error_message}")
     print(
-        f"  Çekilen indirimli ürün: {fetched_count} | Filtreden geçen: {filter_summary.passed_count} | "
-        f"Elenen: {filter_summary.rejected_count} | Kaydedilen: {saved_count} | "
-        f"AI puanlanan: {ai_scored_count} | Bildirilen: {notified_count}"
+        f"  Çekilen indirimli ürün: {fetched_count} | Kataloğa uygun: {filter_summary.passed_count} | "
+        f"Bildirim kriterine uyan (sıkı): {strict_matched_count} | Elenen: {filter_summary.rejected_count} | "
+        f"Kaydedilen: {saved_count} | AI puanlanan: {ai_scored_count} | Bildirilen: {notified_count}"
     )
     if filter_summary.rejection_breakdown:
         breakdown_str = ", ".join(
@@ -327,7 +330,7 @@ def _print_brand_report(
         print(f"  Eleme dağılımı: {breakdown_str}")
 
     if matched_entries:
-        print("  --- Eşleşen Ürünler (ilk 15) ---")
+        print("  --- Kataloğa Alınan Ürünler (ilk 15) ---")
         for product, f_res, p_res, ai_score, ai_comment in matched_entries[:15]:
             orig = f"{product.original_price} TL" if product.original_price else "-"
             cart_tag = f" | Sepette: {product.cart_price} TL" if product.cart_price is not None else ""
@@ -340,6 +343,11 @@ def _print_brand_report(
                 else ""
             )
             fabric = product.fabric_info or "kumaş bilgisi yok"
+            if product.available_sizes:
+                matched_str = ", ".join(f_res.matched_sizes) if f_res.matched_sizes else "-"
+                sizes_line = f"Eşleşen bedenler: {matched_str} (Tüm stok: {', '.join(product.available_sizes)}){stock_tag}"
+            else:
+                sizes_line = f"Beden: Beden sitede kontrol{stock_tag}"
             ai_line = ""
             if ai_score is not None:
                 comment_suffix = f" — {ai_comment}" if ai_comment else ""
@@ -348,8 +356,7 @@ def _print_brand_report(
                 f"  • [{product.category.value} | {product.gender.value}] {product.title}{promo_tag}\n"
                 f"    Fiyat: {product.current_price} TL{cart_tag} (Eski: {orig}, %{product.discount_percent}) | "
                 f"{real_tag}{days_tag}\n"
-                f"    Eşleşen bedenler: {', '.join(f_res.matched_sizes)} "
-                f"(Tüm stok: {', '.join(product.available_sizes)}){stock_tag}\n"
+                f"    {sizes_line}\n"
                 f"    Kumaş: {fabric} | Link: {product.url}{ai_line}"
             )
     print("=" * 72)
@@ -498,6 +505,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
     had_failure = False
     total_ai_scored = 0
+    succeeded_brands: list[str] = []
 
     for brand in brands:
         started = time.perf_counter()
@@ -569,18 +577,23 @@ def run_pipeline(args: argparse.Namespace) -> int:
             )
             continue
 
-        passed_items, filter_summary = product_filter.filter_products(scrape_result.products)
+        passed_items, filter_summary = product_filter.filter_for_catalog(scrape_result.products)
         matched_entries: list[
             tuple[ProductItem, FilterResult, PriceAnalysis, int | None, str | None]
         ] = []
+        strict_matched_count = 0
         saved_count = 0
         ai_scored_count = 0
         notified_count = 0
         final_status = scrape_result.status
         pipeline_error: str | None = scrape_result.error_message
 
-        for product, filter_res in passed_items:
+        for product, catalog_res in passed_items:
             try:
+                strict_res = product_filter.evaluate(product)
+                if strict_res.passed:
+                    strict_matched_count += 1
+
                 existing_row = (
                     db.get_product_by_external_id(product.brand, product.external_id)
                     if db is not None
@@ -601,7 +614,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     existing_row.get("ai_comment") if existing_row else None
                 )
 
-                if ai_scorer is not None:
+                # Reserve Gemini AI scoring quota for strict-matching real discounts
+                if ai_scorer is not None and strict_res.passed:
                     should_score, score_reason = AIStyleScorer.should_score_product(
                         analysis,
                         existing_product=existing_row,
@@ -646,7 +660,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                         )
 
                 matched_entries.append(
-                    (product, filter_res, analysis, effective_ai_score, effective_ai_comment)
+                    (product, catalog_res, analysis, effective_ai_score, effective_ai_comment)
                 )
 
                 if not args.dry_run and db is not None:
@@ -673,7 +687,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
                         else effective_ai_score
                     )
 
-                    if notifier is not None:
+                    # Keep Web Push alerts strictly gated by user's /settings size, fabric & threshold rules
+                    if notifier is not None and strict_res.passed:
                         should_send, notify_reason = notifier.should_notify_product(
                             product,
                             analysis=analysis,
@@ -685,7 +700,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                             push_report = notifier.notify_product(
                                 product,
                                 product_id=str(saved_row["id"]),
-                                matched_sizes=filter_res.matched_sizes,
+                                matched_sizes=strict_res.matched_sizes,
                                 lowest_price_days=analysis.lowest_price_days,
                                 ai_score=persisted_ai_score,
                             )
@@ -702,6 +717,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 logger.warning("[%s] Failed processing product %s: %s", brand, product.external_id, exc)
                 final_status = ScrapeStatus.PARTIAL
                 pipeline_error = f"Partial save error: {exc}"
+
+        if final_status == ScrapeStatus.SUCCESS and scrape_result.fetched_count > 0:
+            succeeded_brands.append(brand)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
 
@@ -725,6 +743,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
             status=final_status,
             fetched_count=scrape_result.fetched_count,
             filter_summary=filter_summary,
+            strict_matched_count=strict_matched_count,
             matched_entries=matched_entries,
             saved_count=saved_count,
             ai_scored_count=ai_scored_count,
@@ -733,6 +752,22 @@ def run_pipeline(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             error_message=pipeline_error,
         )
+
+    if not args.dry_run and db is not None and succeeded_brands and hasattr(db, "cleanup_stale_products"):
+        try:
+            deleted_stale = db.cleanup_stale_products(succeeded_brands, max_age_hours=72)
+            logger.info(
+                "Stale product cleanup (>72h) completed for %d succeeded brand(s) [%s]: deleted %d row(s).",
+                len(succeeded_brands),
+                ", ".join(succeeded_brands),
+                deleted_stale,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Stale product cleanup failed for succeeded brand(s) [%s]: %s",
+                ", ".join(succeeded_brands),
+                exc,
+            )
 
     return 1 if had_failure and len(brands) == 1 else 0
 

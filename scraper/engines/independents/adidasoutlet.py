@@ -55,9 +55,9 @@ class AdidasOutletScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 3,
-        max_pages_per_category: int = 2,
+        max_pages_per_category: int = 8,
         page_size: int = 48,
-        max_detail_fetches: int = 40,
+        max_detail_fetches: int = 48,
         fetch_availability: bool = True,
         max_retries: int = 1,
         impersonate: str | None = None,
@@ -260,6 +260,7 @@ class AdidasOutletScraper(BaseScraper):
                 self.sleep_jitter()
 
             q_failed = False
+            consecutive_empty_pages = 0
             for page_idx in range(self.max_pages_per_category):
                 if page_idx > 0:
                     self.sleep_jitter()
@@ -285,6 +286,7 @@ class AdidasOutletScraper(BaseScraper):
                 if not raw_items:
                     break
 
+                new_in_page = 0
                 for raw_item in raw_items:
                     pid = str(raw_item.get("productId") or raw_item.get("modelId") or "").strip()
                     if not pid or pid in seen_ids:
@@ -297,6 +299,14 @@ class AdidasOutletScraper(BaseScraper):
                         continue
                     seen_ids.add(pid)
                     candidates.append((raw_item, query_slug))
+                    new_in_page += 1
+
+                if new_in_page == 0:
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
 
                 if len(raw_items) < self.page_size:
                     break
@@ -322,8 +332,6 @@ class AdidasOutletScraper(BaseScraper):
                     raise
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("[%s] Availability fetch failed for %s: %s", self.brand, pid, exc)
-            elif self.fetch_availability and detail_count >= self.max_detail_fetches:
-                break
 
             item = self.parse_plp_item(
                 raw_item,

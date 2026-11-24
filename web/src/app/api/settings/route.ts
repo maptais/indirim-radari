@@ -15,6 +15,13 @@ import type {
 } from "@/types/database";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+const NO_CACHE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
+} as const;
 
 const VALID_GENDERS = new Set<ProductGender>(GENDER_ORDER);
 
@@ -135,7 +142,7 @@ export async function GET() {
     if (error) {
       return NextResponse.json(
         { error: "Ayarlar veritabanından okunamadı.", details: error.message },
-        { status: 500 }
+        { status: 500, headers: NO_CACHE_HEADERS }
       );
     }
 
@@ -145,18 +152,21 @@ export async function GET() {
           error:
             "user_settings (id=1) başlangıç kaydı bulunamadı. Lütfen supabase/schema.sql dosyasını çalıştırın.",
         },
-        { status: 404 }
+        { status: 404, headers: NO_CACHE_HEADERS }
       );
     }
 
-    return NextResponse.json({
-      settings: normalizeSettingsRow(data as Record<string, unknown>),
-    });
+    return NextResponse.json(
+      {
+        settings: normalizeSettingsRow(data as Record<string, unknown>),
+      },
+      { headers: NO_CACHE_HEADERS }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Bilinmeyen sunucu hatası";
     return NextResponse.json(
       { error: "Ayarlar yüklenirken bir hata oluştu.", details: message },
-      { status: 500 }
+      { status: 500, headers: NO_CACHE_HEADERS }
     );
   }
 }
@@ -167,7 +177,7 @@ export async function PUT(request: NextRequest) {
     if (!body || typeof body !== "object") {
       return NextResponse.json(
         { error: "Geçersiz ayar verisi gönderildi." },
-        { status: 400 }
+        { status: 400, headers: NO_CACHE_HEADERS }
       );
     }
 
@@ -216,19 +226,22 @@ export async function PUT(request: NextRequest) {
     if (error) {
       return NextResponse.json(
         { error: "Ayarlar kaydedilemedi.", details: error.message },
-        { status: 500 }
+        { status: 500, headers: NO_CACHE_HEADERS }
       );
     }
 
-    return NextResponse.json({
-      message: "Ayarlarınız başarıyla kaydedildi.",
-      settings: normalizeSettingsRow(data as Record<string, unknown>),
-    });
+    return NextResponse.json(
+      {
+        message: "Ayarlarınız başarıyla kaydedildi.",
+        settings: normalizeSettingsRow(data as Record<string, unknown>),
+      },
+      { headers: NO_CACHE_HEADERS }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Bilinmeyen sunucu hatası";
     return NextResponse.json(
       { error: "Ayarlar güncellenirken bir hata oluştu.", details: message },
-      { status: 500 }
+      { status: 500, headers: NO_CACHE_HEADERS }
     );
   }
 }

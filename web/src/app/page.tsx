@@ -8,6 +8,7 @@ import type {
 } from "@/types/database";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 const VALID_GENDERS = new Set<ProductGender>(GENDER_ORDER);
 
@@ -43,6 +44,7 @@ async function loadInitialProducts(): Promise<{
       realDiscountCount: 0,
       criticalStockCount: 0,
       cartPromoCount: 0,
+      unknownSizeCount: 0,
       latestScrapedAt: null,
     },
   };
@@ -60,7 +62,7 @@ async function loadInitialProducts(): Promise<{
         .eq("is_active", true)
         .order("discount_percent", { ascending: false })
         .order("last_seen_at", { ascending: false })
-        .limit(500),
+        .limit(1000),
       supabase
         .from("scrape_logs")
         .select("finished_at, started_at")
@@ -135,6 +137,7 @@ async function loadInitialProducts(): Promise<{
     let realDiscountCount = 0;
     let criticalStockCount = 0;
     let cartPromoCount = 0;
+    let unknownSizeCount = 0;
     let latestProductSeen: string | null = null;
 
     for (const item of products) {
@@ -142,6 +145,7 @@ async function loadInitialProducts(): Promise<{
       if (item.is_real_discount) realDiscountCount += 1;
       if (item.is_critical_stock) criticalStockCount += 1;
       if (item.cart_price !== null || item.promo_badge) cartPromoCount += 1;
+      if (item.available_sizes.length === 0) unknownSizeCount += 1;
       if (
         item.last_seen_at &&
         (!latestProductSeen || item.last_seen_at > latestProductSeen)
@@ -166,6 +170,7 @@ async function loadInitialProducts(): Promise<{
           realDiscountCount,
           criticalStockCount,
           cartPromoCount,
+          unknownSizeCount,
           latestScrapedAt,
         },
       },

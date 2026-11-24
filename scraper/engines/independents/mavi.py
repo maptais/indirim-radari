@@ -112,8 +112,8 @@ class MaviScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 4,
-        max_pages_per_category: int = 2,
-        max_detail_fetches: int = 36,
+        max_pages_per_category: int = 10,
+        max_detail_fetches: int = 40,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
@@ -510,6 +510,7 @@ class MaviScraper(BaseScraper):
                 self.sleep_jitter()
 
             cat_failed = False
+            consecutive_empty_pages = 0
             for page in range(self.max_pages_per_category):
                 if page > 0:
                     self.sleep_jitter()
@@ -553,7 +554,11 @@ class MaviScraper(BaseScraper):
                     new_in_page += 1
 
                 if new_in_page == 0:
-                    break
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
 
             if cat_failed:
                 cat_failures += 1
@@ -571,26 +576,37 @@ class MaviScraper(BaseScraper):
 
         products: list[ProductItem] = []
         detail_fetches = 0
+        pdp_blocked = False
 
         for raw_prod, path, _ in candidates:
             detail_html: str | None = None
-            if self.fetch_variant_details:
-                if detail_fetches >= self.max_detail_fetches:
-                    break
+            if (
+                self.fetch_variant_details
+                and not pdp_blocked
+                and detail_fetches < self.max_detail_fetches
+            ):
                 if detail_fetches > 0:
                     self.sleep_jitter()
                 rel_url = str(raw_prod.get("url") or "").strip()
-                if not rel_url:
-                    continue
-                pdp_url = urljoin(f"{self.base_url}/", rel_url.lstrip("/"))
-                try:
-                    detail_html = self.http.get_text(pdp_url)
-                    detail_fetches += 1
-                except ScraperBlockedError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("[%s] Detail fetch failed for %s: %s", self.brand, pdp_url, exc)
-                    continue
+                if rel_url:
+                    pdp_url = urljoin(f"{self.base_url}/", rel_url.lstrip("/"))
+                    try:
+                        detail_html = self.http.get_text(pdp_url)
+                        detail_fetches += 1
+                    except ScraperBlockedError as exc:
+                        if not products:
+                            raise
+                        logger.warning(
+                            "[%s] PDP blocked after %d products (%s); continuing with listing fallback.",
+                            self.brand,
+                            len(products),
+                            exc,
+                        )
+                        pdp_blocked = True
+                        detail_html = None
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("[%s] Detail fetch failed for %s: %s", self.brand, pdp_url, exc)
+                        detail_html = None
 
             item = self.parse_listing_product(
                 raw_prod,

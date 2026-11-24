@@ -199,11 +199,20 @@ class FilterBatchSummary(BaseModel):
     rejection_breakdown: dict[str, int] = Field(default_factory=dict)
 
 
+DEFAULT_MIN_CATALOG_DISCOUNT_PERCENT = 15
+
+
 class ProductFilter:
     """Evaluates products against size, keyword, fabric, discount, and budget rules."""
 
-    def __init__(self, user_settings: UserSettings) -> None:
+    def __init__(
+        self,
+        user_settings: UserSettings,
+        *,
+        min_catalog_discount_percent: int = DEFAULT_MIN_CATALOG_DISCOUNT_PERCENT,
+    ) -> None:
         self.user_settings = user_settings
+        self.min_catalog_discount_percent = max(0, min(100, min_catalog_discount_percent))
         self._target_genders = {g.strip().lower() for g in user_settings.target_genders if g.strip()}
         self._negative_keywords = [
             turkish_lower(kw.strip()) for kw in user_settings.negative_keywords if kw.strip()
@@ -211,6 +220,79 @@ class ProductFilter:
         self._excluded_fabrics = [
             turkish_lower(fab.strip()) for fab in user_settings.excluded_fabrics if fab.strip()
         ]
+
+    def evaluate_for_catalog(self, product: ProductItem) -> FilterResult:
+        """Relaxed catalog gate for saving discounted deals into Supabase `products`.
+
+        Keeps products that match `target_genders`, have a positive price, and carry
+        either at least `min_catalog_discount_percent` (>= 15%) off OR a cart/promo
+        deal — even if the listing page did not return size or fabric metadata.
+        """
+        reasons: list[str] = []
+
+        if self._target_genders and product.gender.value not in self._target_genders:
+            reasons.append(f"gender_mismatch:{product.gender.value}")
+
+        effective_price = product.effective_price
+        if effective_price <= Decimal("0"):
+            reasons.append("invalid_price")
+
+        discount = product.discount_percent or 0
+        has_cart_or_promo = (
+            product.cart_price is not None and product.cart_price < product.current_price
+        ) or bool(product.promo_badge)
+        if discount < self.min_catalog_discount_percent and not has_cart_or_promo:
+            reasons.append(
+                f"catalog_discount_below_min:{discount}%<{self.min_catalog_discount_percent}%"
+            )
+
+        target_sizes = self.user_settings.get_target_sizes(product.category.value)
+        matched_sizes = match_sizes(
+            product.available_sizes,
+            target_sizes,
+            category=product.category,
+        )
+        effective_polyester = (
+            product.polyester_percent
+            if product.polyester_percent is not None
+            else extract_polyester_percent(product.fabric_info)
+        )
+
+        return FilterResult(
+            passed=len(reasons) == 0,
+            reasons=reasons,
+            matched_sizes=matched_sizes,
+            effective_polyester_percent=effective_polyester,
+        )
+
+    def filter_for_catalog(
+        self,
+        products: list[ProductItem],
+    ) -> tuple[list[tuple[ProductItem, FilterResult]], FilterBatchSummary]:
+        """Filter scraped products using the relaxed catalog gate for DB storage."""
+        passed_items: list[tuple[ProductItem, FilterResult]] = []
+        breakdown: Counter[str] = Counter()
+
+        for product in products:
+            result = self.evaluate_for_catalog(product)
+            if result.passed:
+                if product.polyester_percent is None and result.effective_polyester_percent is not None:
+                    product = product.model_copy(
+                        update={"polyester_percent": result.effective_polyester_percent}
+                    )
+                passed_items.append((product, result))
+            else:
+                for reason in result.reasons:
+                    bucket = reason.split(":", 1)[0]
+                    breakdown[bucket] += 1
+
+        summary = FilterBatchSummary(
+            total_count=len(products),
+            passed_count=len(passed_items),
+            rejected_count=len(products) - len(passed_items),
+            rejection_breakdown=dict(breakdown),
+        )
+        return passed_items, summary
 
     def evaluate(self, product: ProductItem) -> FilterResult:
         """Evaluate all filter rules for a single product."""

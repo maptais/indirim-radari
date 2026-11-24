@@ -109,6 +109,33 @@ class DatabaseClient:
             .execute()
         )
 
+    def cleanup_stale_products(
+        self,
+        brands: list[str],
+        *,
+        max_age_hours: int = 72,
+    ) -> int:
+        """Delete products not seen within `max_age_hours` for the given succeeded brands.
+
+        Scoped strictly to brands successfully scraped by the current job so parallel
+        GitHub Actions matrix workers never conflict or wipe failed/blocked brands.
+        Linked `price_history` rows cascade-delete via FK to protect Supabase 500 MB quota.
+        """
+        normalized_brands = sorted({b.strip().lower() for b in brands if b and b.strip()})
+        if not normalized_brands:
+            return 0
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, max_age_hours))).isoformat()
+        response = (
+            self._client.table("products")
+            .delete()
+            .in_("brand", normalized_brands)
+            .lt("last_seen_at", cutoff)
+            .execute()
+        )
+        rows = response.data or []
+        return len(rows)
+
     # ------------------------------------------------------------------
     # price_history
     # ------------------------------------------------------------------

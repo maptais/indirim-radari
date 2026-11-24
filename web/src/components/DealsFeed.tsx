@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
+  EyeOff,
   Flame,
   Radar,
   RefreshCw,
+  Ruler,
   Search,
   ShoppingCart,
   SlidersHorizontal,
@@ -38,12 +40,26 @@ interface DealsFeedProps {
 type SortKey = "discount" | "newest" | "price_asc" | "ai_score";
 type GenderFilterKey = "settings" | "all" | ProductGender;
 
+interface FetchParams {
+  gender: GenderFilterKey;
+  brand: string;
+  category: string;
+  realOnly: boolean;
+  cartOnly: boolean;
+  hideUnknownSizes: boolean;
+  mySizesOnly: boolean;
+  sort: SortKey;
+  q: string;
+}
+
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "discount", label: "En Yüksek İndirim" },
   { value: "newest", label: "En Yeni" },
   { value: "price_asc", label: "En Düşük Fiyat" },
   { value: "ai_score", label: "AI Tarz Puanı" },
 ];
+
+const AUTO_REFRESH_COOLDOWN_MS = 3000;
 
 export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) {
   const [products, setProducts] = useState<ProductRow[]>(initialData.products);
@@ -61,62 +77,87 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
   >("all");
   const [realOnly, setRealOnly] = useState<boolean>(false);
   const [cartOnly, setCartOnly] = useState<boolean>(false);
+  const [hideUnknownSizes, setHideUnknownSizes] = useState<boolean>(false);
+  const [mySizesOnly, setMySizesOnly] = useState<boolean>(false);
   const [sortBy, setSortBy] = useState<SortKey>("discount");
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(initialError);
   const hasMountedRef = useRef(false);
+  const inFlightRef = useRef(false);
+  const lastAutoRefreshRef = useRef<number>(0);
 
-  const fetchProducts = useCallback(
-    async (params: {
-      gender: GenderFilterKey;
-      brand: string;
-      category: string;
-      realOnly: boolean;
-      cartOnly: boolean;
-      sort: SortKey;
-      q: string;
-    }) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const sp = new URLSearchParams();
-        if (params.gender) sp.set("gender", params.gender);
-        if (params.brand !== "all") sp.set("brand", params.brand);
-        if (params.category !== "all") sp.set("category", params.category);
-        if (params.realOnly) sp.set("realOnly", "true");
-        if (params.cartOnly) sp.set("cartOnly", "true");
-        if (params.sort) sp.set("sort", params.sort);
-        if (params.q.trim()) sp.set("q", params.q.trim());
+  const currentParamsRef = useRef<FetchParams>({
+    gender: selectedGender,
+    brand: selectedBrand,
+    category: selectedCategory,
+    realOnly,
+    cartOnly,
+    hideUnknownSizes,
+    mySizesOnly,
+    sort: sortBy,
+    q: searchQuery,
+  });
 
-        const res = await fetch(`/api/products?${sp.toString()}`, {
-          cache: "no-store",
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || "Ürünler yüklenemedi.");
-        }
+  currentParamsRef.current = {
+    gender: selectedGender,
+    brand: selectedBrand,
+    category: selectedCategory,
+    realOnly,
+    cartOnly,
+    hideUnknownSizes,
+    mySizesOnly,
+    sort: sortBy,
+    q: searchQuery,
+  };
 
-        setProducts(data.products || []);
-        setBrands(data.brands || []);
-        if (Array.isArray(data.targetGenders)) {
-          setTargetGenders(data.targetGenders);
-        }
-        if (data.stats) setStats(data.stats);
-      } catch (err) {
-        setError(
-          err instanceof Error
-            ? err.message
-            : "İndirim akışı alınırken bir hata oluştu."
-        );
-      } finally {
-        setLoading(false);
+  const fetchProducts = useCallback(async (params: FetchParams) => {
+    inFlightRef.current = true;
+    setLoading(true);
+    setError(null);
+    try {
+      const sp = new URLSearchParams();
+      if (params.gender) sp.set("gender", params.gender);
+      if (params.brand !== "all") sp.set("brand", params.brand);
+      if (params.category !== "all") sp.set("category", params.category);
+      if (params.realOnly) sp.set("realOnly", "true");
+      if (params.cartOnly) sp.set("cartOnly", "true");
+      if (params.hideUnknownSizes) sp.set("hideUnknownSizes", "true");
+      if (params.mySizesOnly) sp.set("mySizesOnly", "true");
+      if (params.sort) sp.set("sort", params.sort);
+      if (params.q.trim()) sp.set("q", params.q.trim());
+
+      const res = await fetch(`/api/products?${sp.toString()}`, {
+        cache: "no-store",
+        headers: {
+          "Cache-Control": "no-cache",
+        },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Ürünler yüklenemedi.");
       }
-    },
-    []
-  );
 
+      setProducts(data.products || []);
+      setBrands(data.brands || []);
+      if (Array.isArray(data.targetGenders)) {
+        setTargetGenders(data.targetGenders);
+      }
+      if (data.stats) setStats(data.stats);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "İndirim akışı alınırken bir hata oluştu."
+      );
+    } finally {
+      inFlightRef.current = false;
+      setLoading(false);
+    }
+  }, []);
+
+  // Refresh when filter controls change
   useEffect(() => {
     if (!hasMountedRef.current) {
       hasMountedRef.current = true;
@@ -124,15 +165,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
     }
 
     const timer = window.setTimeout(() => {
-      void fetchProducts({
-        gender: selectedGender,
-        brand: selectedBrand,
-        category: selectedCategory,
-        realOnly,
-        cartOnly,
-        sort: sortBy,
-        q: searchQuery,
-      });
+      void fetchProducts(currentParamsRef.current);
     }, 180);
 
     return () => window.clearTimeout(timer);
@@ -142,10 +175,53 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
     selectedCategory,
     realOnly,
     cartOnly,
+    hideUnknownSizes,
+    mySizesOnly,
     sortBy,
     searchQuery,
     fetchProducts,
   ]);
+
+  // Auto-refresh when PWA returns to foreground (visibilitychange, focus, iOS bfcache pageshow)
+  useEffect(() => {
+    const triggerForegroundRefresh = () => {
+      const now = Date.now();
+      if (
+        inFlightRef.current ||
+        now - lastAutoRefreshRef.current < AUTO_REFRESH_COOLDOWN_MS
+      ) {
+        return;
+      }
+      lastAutoRefreshRef.current = now;
+      void fetchProducts(currentParamsRef.current);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        triggerForegroundRefresh();
+      }
+    };
+
+    const handleFocus = () => {
+      triggerForegroundRefresh();
+    };
+
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        triggerForegroundRefresh();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener("pageshow", handlePageShow);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("pageshow", handlePageShow);
+    };
+  }, [fetchProducts]);
 
   const hasActiveFilters = useMemo(
     () =>
@@ -154,6 +230,8 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
       selectedCategory !== "all" ||
       realOnly ||
       cartOnly ||
+      hideUnknownSizes ||
+      mySizesOnly ||
       searchQuery.trim().length > 0,
     [
       selectedGender,
@@ -161,6 +239,8 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
       selectedCategory,
       realOnly,
       cartOnly,
+      hideUnknownSizes,
+      mySizesOnly,
       searchQuery,
     ]
   );
@@ -171,6 +251,8 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
     setSelectedCategory("all");
     setRealOnly(false);
     setCartOnly(false);
+    setHideUnknownSizes(false);
+    setMySizesOnly(false);
     setSearchQuery("");
     setSortBy("discount");
   };
@@ -183,43 +265,34 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
     <div className="flex flex-col">
       {/* Sticky iOS Translucent Header */}
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[#09090b]/85 px-4 pb-3 pt-safe backdrop-blur-xl">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30">
               <Radar className="h-5 w-5" />
             </div>
-            <div>
-              <h1 className="text-base leading-tight font-bold tracking-tight text-white">
+            <div className="min-w-0">
+              <h1 className="truncate text-base leading-tight font-bold tracking-tight text-white">
                 İndirim Radarı
               </h1>
-              <p className="text-[11px] text-zinc-400">
+              <p className="truncate text-[11px] text-zinc-400">
                 Son tarama: {formatRelativeTimeTr(stats.latestScrapedAt)}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <PushControl variant="compact" />
             <button
               type="button"
-              onClick={() =>
-                void fetchProducts({
-                  gender: selectedGender,
-                  brand: selectedBrand,
-                  category: selectedCategory,
-                  realOnly,
-                  cartOnly,
-                  sort: sortBy,
-                  q: searchQuery,
-                })
-              }
+              onClick={() => void fetchProducts(currentParamsRef.current)}
               disabled={loading}
               aria-label="Listeyi yenile"
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-zinc-300 transition hover:bg-white/10 disabled:opacity-60"
+              className="inline-flex h-9 items-center gap-1.5 rounded-full border border-emerald-500/35 bg-emerald-500/15 px-3.5 text-xs font-semibold text-emerald-200 shadow-sm shadow-emerald-950/30 transition hover:bg-emerald-500/25 active:scale-[0.98] disabled:opacity-60"
             >
               <RefreshCw
-                className={`h-4 w-4 ${loading ? "animate-spin text-emerald-400" : ""}`}
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin text-emerald-300" : ""}`}
               />
+              <span>{loading ? "Yenileniyor" : "Yenile"}</span>
             </button>
           </div>
         </div>
@@ -317,6 +390,41 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
                 <span>
                   Sepette İndirimliler
                   {stats.cartPromoCount > 0 ? ` (${stats.cartPromoCount})` : ""}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={mySizesOnly}
+                onClick={() => setMySizesOnly((prev) => !prev)}
+                className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-2xl border px-3.5 text-xs font-semibold transition ${
+                  mySizesOnly
+                    ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                    : "border-white/10 bg-zinc-950/70 text-zinc-300 hover:bg-zinc-900"
+                }`}
+              >
+                <Ruler className="h-3.5 w-3.5" />
+                <span>Bedenime Uygun</span>
+              </button>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={hideUnknownSizes}
+                onClick={() => setHideUnknownSizes((prev) => !prev)}
+                className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-2xl border px-3.5 text-xs font-semibold transition ${
+                  hideUnknownSizes
+                    ? "border-sky-400/50 bg-sky-400/15 text-sky-200"
+                    : "border-white/10 bg-zinc-950/70 text-zinc-300 hover:bg-zinc-900"
+                }`}
+              >
+                <EyeOff className="h-3.5 w-3.5" />
+                <span>
+                  Beden bilgisi olmayanları gizle
+                  {stats.unknownSizeCount > 0
+                    ? ` (${stats.unknownSizeCount})`
+                    : ""}
                 </span>
               </button>
 

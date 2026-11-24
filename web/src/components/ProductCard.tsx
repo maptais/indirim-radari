@@ -232,7 +232,7 @@ export function ProductCard({ product }: ProductCardProps) {
         )}
 
         {/* Available Sizes */}
-        {product.available_sizes.length > 0 && (
+        {product.available_sizes.length > 0 ? (
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="mr-0.5 text-[11px] text-zinc-500">Bedenler:</span>
             {product.available_sizes.slice(0, 7).map((size) => (
@@ -248,6 +248,13 @@ export function ProductCard({ product }: ProductCardProps) {
                 +{product.available_sizes.length - 7}
               </span>
             )}
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-0.5 text-[11px] text-zinc-500">Bedenler:</span>
+            <span className="inline-flex items-center rounded-lg border border-amber-400/25 bg-amber-400/10 px-2 py-0.5 text-[11px] font-medium text-amber-200">
+              Beden sitede kontrol
+            </span>
           </div>
         )}
 

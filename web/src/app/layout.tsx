@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 
 import { BottomNav } from "@/components/BottomNav";
+import { SwRegistrar } from "@/components/SwRegistrar";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -57,6 +58,7 @@ export default function RootLayout({
         <meta name="mobile-web-app-capable" content="yes" />
       </head>
       <body className="min-h-dvh bg-[#09090b] text-zinc-100 antialiased selection:bg-emerald-500/30 selection:text-emerald-100">
+        <SwRegistrar />
         <div className="mx-auto flex min-h-dvh w-full max-w-5xl flex-col">
           <main className="flex-1 pb-nav-safe">{children}</main>
           <BottomNav />
