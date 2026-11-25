@@ -91,7 +91,7 @@ class TestRelaxedCatalogVsStrictPush(unittest.TestCase):
         self.assertFalse(ok_push)
         self.assertIn("strict_filter", reason)
 
-    def test_catalog_filter_keeps_cart_or_promo_badge_and_rejects_low_discount_or_wrong_gender(self) -> None:
+    def test_catalog_filter_keeps_all_genders_and_cart_promos_while_push_rejects_non_target_gender(self) -> None:
         promo_only = ProductItem(
             brand="superstep",
             external_id="ss-promo",
@@ -121,7 +121,9 @@ class TestRelaxedCatalogVsStrictPush(unittest.TestCase):
         self.assertFalse(low_res.passed)
         self.assertTrue(any(r.startswith("catalog_discount_below_min") for r in low_res.reasons))
 
-        wrong_gender = ProductItem(
+        # Women item passes catalog gate (saved to DB so UI "Kadın" filter works),
+        # while strict filter & PushNotifier still honor `user_settings.target_genders=["men", "unisex"]`.
+        women_item = ProductItem(
             brand="defacto",
             external_id="df-women",
             title="Kadın Triko Kazak",
@@ -132,9 +134,18 @@ class TestRelaxedCatalogVsStrictPush(unittest.TestCase):
             original_price=Decimal("1000.00"),
             available_sizes=["M"],
         )
-        gender_res = self.pf.evaluate_for_catalog(wrong_gender)
-        self.assertFalse(gender_res.passed)
-        self.assertIn("gender_mismatch:women", gender_res.reasons)
+        self.assertTrue(self.pf.evaluate_for_catalog(women_item).passed)
+        strict_res = self.pf.evaluate(women_item)
+        self.assertFalse(strict_res.passed)
+        self.assertIn("gender_mismatch:women", strict_res.reasons)
+        ok_push, push_reason = PushNotifier.should_notify_product(
+            women_item,
+            analysis=PriceAnalysis(is_real_discount=True, lowest_price_days=30),
+            user_settings=self.settings,
+            ai_score=9,
+        )
+        self.assertFalse(ok_push)
+        self.assertIn("gender_mismatch", push_reason)
 
     def test_pipeline_saves_relaxed_catalog_but_only_scores_and_notifies_strict_matches(self) -> None:
         strict_ok = ProductItem(

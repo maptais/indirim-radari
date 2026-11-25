@@ -24,6 +24,7 @@ from ..core.http import (
     HttpClient,
     infer_product_category,
     infer_product_gender,
+    interleave_by_gender,
     is_kids_product,
     parse_try_price,
 )
@@ -95,12 +96,12 @@ class MangoBrandConfig:
 MANGO_BRAND_CONFIGS: dict[str, MangoBrandConfig] = {
     "mangoman": MangoBrandConfig(
         brand="mangoman",
-        display_name="Mango Man",
+        display_name="Mango",
         domain="shop.mango.com",
         home_paths={
-            "all": ("/tr/tr/h/erkek",),
+            "all": ("/tr/tr/h/erkek", "/tr/tr/h/kadin"),
             "men": ("/tr/tr/h/erkek",),
-            "women": (),
+            "women": ("/tr/tr/h/kadin",),
         },
         fallback_category_paths={
             "all": (
@@ -500,12 +501,11 @@ class MangoScraper(BaseScraper):
             default=ProductCategory.TOPS,
         )
 
-        default_gender = ProductGender.MEN if self.brand == "mangoman" else ProductGender.UNISEX
         inferred_gender = infer_product_gender(
             title,
             rel_url,
             category_path,
-            default=default_gender,
+            default=ProductGender.UNISEX,
         )
 
         external_id = f"{ref}-{default_color_id}" if default_color_id else ref
@@ -564,11 +564,11 @@ class MangoScraper(BaseScraper):
                 logger.debug("[%s] Home discovery failed on %s: %s", self.brand, home_path, exc)
                 continue
 
-            for match in re.findall(r'(/tr/tr/c/(?:erkek|kadin)/[^"\\\s<>]+/[a-f0-9]{6,12})', html):
+            for match in re.findall(r'(/tr/tr/c/(?:erkek|kadin|kad%C4%B1n)/[^"\\\s<>]+/[a-f0-9]{6,12})', html):
                 lower_m = turkish_lower(match)
                 if match in seen:
                     continue
-                if self.section == "men" and "/kadin/" in lower_m:
+                if self.section == "men" and ("/kadin/" in lower_m or "/kad%c4%b1n/" in lower_m):
                     continue
                 if self.section == "women" and "/erkek/" in lower_m:
                     continue
@@ -580,19 +580,25 @@ class MangoScraper(BaseScraper):
                 else:
                     discovered_regular.append(match)
 
-        fallbacks = list(
-            self.config.fallback_category_paths.get(self.section)
-            or self.config.fallback_category_paths["all"]
-        )
-        ordered = discovered_sale + [p for p in fallbacks if p not in seen] + discovered_regular
+        raw_fallbacks = self.config.fallback_category_paths.get(self.section)
+        if raw_fallbacks is None:
+            raw_fallbacks = self.config.fallback_category_paths["all"]
+        extra_fallbacks = [p for p in raw_fallbacks if p not in seen]
+
+        regular_pool = discovered_regular + extra_fallbacks
+        if self.section == "all":
+            discovered_sale = interleave_by_gender(
+                discovered_sale, lambda p: infer_product_gender(p)
+            )
+            regular_pool = interleave_by_gender(
+                regular_pool, lambda p: infer_product_gender(p)
+            )
+
+        ordered = discovered_sale + regular_pool
         return ordered[: self.max_categories]
 
     def fetch_products(self) -> list[ProductItem]:
-        """Fetch discounted Mango Man or Mango Outlet products."""
-        if self.brand == "mangoman" and self.section == "women":
-            logger.info("[mangoman] Skipping because section='women' does not match Mango Man.")
-            return []
-
+        """Fetch discounted Mango or Mango Outlet products across configured sections."""
         selected_paths = self._discover_category_paths()
         if not selected_paths:
             return []
@@ -645,6 +651,16 @@ class MangoScraper(BaseScraper):
             raise RuntimeError(f"All {len(selected_paths)} Mango categories failed for {self.brand}")
 
         candidates.sort(key=lambda item: -item[2])
+        if self.section == "all":
+            candidates = interleave_by_gender(
+                candidates,
+                lambda item: infer_product_gender(
+                    str((item[0].get("product") or {}).get("name") or ""),
+                    str((item[0].get("product") or {}).get("url") or ""),
+                    item[1],
+                    default=ProductGender.UNISEX,
+                ),
+            )
         logger.info(
             "[%s] Collected %d discounted listing candidates across %d categories",
             self.brand,

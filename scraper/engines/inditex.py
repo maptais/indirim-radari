@@ -27,6 +27,7 @@ from ..core.http import (
     clean_promo_badge_text,
     get_safe_ca_bundle,
     infer_product_gender,
+    interleave_by_gender,
     is_blocked_body,
     is_kids_product,
     resolve_cart_promo,
@@ -613,6 +614,17 @@ class InditexScraper(BaseScraper):
             )
         )
 
+        def _node_gender(node: _CategoryNode) -> ProductGender:
+            return infer_product_gender(
+                node.section_hint,
+                node.path,
+                node.key,
+                default=ProductGender.UNISEX,
+            )
+
+        if self.section == "all":
+            promo_nodes = interleave_by_gender(promo_nodes, _node_gender)
+
         if promo_nodes and not self.include_regular_categories:
             return promo_nodes[: self.max_categories]
 
@@ -623,6 +635,8 @@ class InditexScraper(BaseScraper):
             if not n.is_promo
             and _infer_category(n.path, n.key) != ProductCategory.OTHER
         ]
+        if self.section == "all":
+            regular_nodes = interleave_by_gender(regular_nodes, _node_gender)
         combined = promo_nodes + regular_nodes
         return combined[: self.max_categories]
 
@@ -646,7 +660,7 @@ class InditexScraper(BaseScraper):
         products_by_id: dict[str, ProductItem] = {}
         category_failures = 0
 
-        def _scan(cat_list: list[_CategoryNode]) -> int:
+        def _scan(cat_list: list[_CategoryNode], *, max_batches: int | None = None) -> int:
             nonlocal category_failures
             scanned_failures = 0
             for idx, cat in enumerate(cat_list):
@@ -661,7 +675,7 @@ class InditexScraper(BaseScraper):
                     self.sleep_jitter()
 
                 try:
-                    cat_items = self._fetch_itxrest_category(cat)
+                    cat_items = self._fetch_itxrest_category(cat, max_batches=max_batches)
                     for item in cat_items:
                         if item.external_id not in products_by_id:
                             products_by_id[item.external_id] = item
@@ -687,11 +701,28 @@ class InditexScraper(BaseScraper):
                     )
             return scanned_failures
 
-        first_failures = _scan(categories)
+        effective_batches = (
+            min(self.max_batches_per_category, 10)
+            if self.section == "all" and len(categories) > 6
+            else self.max_batches_per_category
+        )
+        first_failures = _scan(categories, max_batches=effective_batches)
 
-        # If promo-only categories yielded 0 products (e.g. off-season promo banner),
+        # If promo-only categories yielded 0 products (overall or for either men/women in `all` mode),
         # automatically fall back to regular clothing/shoe categories to catch hidden markdowns.
-        if not products_by_id and not self.include_regular_categories:
+        found_genders = {item.gender for item in products_by_id.values()}
+        missing_genders: set[ProductGender] = set()
+        if self.section == "all":
+            if ProductGender.MEN not in found_genders:
+                missing_genders.add(ProductGender.MEN)
+            if ProductGender.WOMEN not in found_genders:
+                missing_genders.add(ProductGender.WOMEN)
+
+        if (
+            (not products_by_id or missing_genders)
+            and not self.include_regular_categories
+            and not self.is_budget_exceeded(reserve_seconds=30.0)
+        ):
             prev_flag = self.include_regular_categories
             self.include_regular_categories = True
             try:
@@ -699,21 +730,36 @@ class InditexScraper(BaseScraper):
             finally:
                 self.include_regular_categories = prev_flag
             scanned_ids = {c.category_id for c in categories}
-            fallback_cats = [c for c in expanded if c.category_id not in scanned_ids][: min(6, self.max_categories)]
+            unscanned = [c for c in expanded if c.category_id not in scanned_ids]
+            if not products_by_id:
+                fallback_cats = unscanned[: min(6, self.max_categories)]
+            else:
+                fallback_cats = [
+                    c
+                    for c in unscanned
+                    if infer_product_gender(c.section_hint, c.path, c.key, default=ProductGender.UNISEX)
+                    in missing_genders
+                ][: min(4, self.max_categories)]
             if fallback_cats:
                 logger.info(
-                    "[%s] Promo categories yielded 0 items; scanning %d fallback regular categories.",
+                    "[%s] Scanning %d fallback regular categories (missing_genders=%s).",
                     self.brand,
                     len(fallback_cats),
+                    sorted(g.value for g in missing_genders) if missing_genders else "all",
                 )
-                _scan(fallback_cats)
+                _scan(fallback_cats, max_batches=min(effective_batches, 8))
 
         if first_failures == len(categories) and not products_by_id:
             raise RuntimeError(f"All {len(categories)} categories failed for {self.brand}")
 
         return list(products_by_id.values())
 
-    def _fetch_itxrest_category(self, category: _CategoryNode) -> list[ProductItem]:
+    def _fetch_itxrest_category(
+        self,
+        category: _CategoryNode,
+        *,
+        max_batches: int | None = None,
+    ) -> list[ProductItem]:
         cfg = self.config
         ids_url = (
             f"https://{cfg.domain}/itxrest/3/catalog/store/{cfg.store_id}/{cfg.catalog_id}"
@@ -727,7 +773,8 @@ class InditexScraper(BaseScraper):
 
         items: list[ProductItem] = []
         consecutive_empty_batches = 0
-        max_items = self.batch_size * self.max_batches_per_category
+        batch_limit = max(1, max_batches) if max_batches is not None else self.max_batches_per_category
+        max_items = self.batch_size * batch_limit
         for offset in range(0, min(len(product_ids), max_items), self.batch_size):
             if self.is_budget_exceeded():
                 logger.warning(
@@ -1152,8 +1199,19 @@ class InditexScraper(BaseScraper):
         if category_failures == len(categories) and not raw_candidates:
             raise RuntimeError(f"All {len(categories)} Zara categories failed")
 
-        # Sort by highest discount first so PDP detail budget goes to the strongest deals
+        # Sort by highest discount first, then interleave genders in `all` mode so both get PDP details
         ordered_candidates = sorted(raw_candidates.values(), key=lambda entry: -entry[2])
+        if self.section == "all":
+            ordered_candidates = interleave_by_gender(
+                ordered_candidates,
+                lambda entry: infer_product_gender(
+                    str(entry[0].get("sectionName") or ""),
+                    entry[1].section_hint,
+                    str(entry[0].get("name") or ""),
+                    entry[1].path,
+                    default=ProductGender.UNISEX,
+                ),
+            )
         logger.info("[%s] Fetching PDP size/fabric details for up to %d of %d Zara candidates", self.brand, self.max_detail_fetches, len(ordered_candidates))
 
         products_by_id: dict[str, ProductItem] = {}

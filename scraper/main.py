@@ -95,12 +95,11 @@ SUPPORTED_BRANDS: tuple[str, ...] = (
     + tuple(INDEPENDENT_SHOE_SCRAPERS.keys())
 )
 
-# Brands that exclusively serve a single gender storefront; skipped automatically
-# when none of their supported genders are present in `user_settings.target_genders`.
+# Brands that exclusively serve a single gender storefront; only skipped when an
+# explicit single-gender `--section` (`men` or `women`) is passed via CLI.
 BRAND_GENDER_SCOPE: dict[str, frozenset[str]] = {
     "trendyolmilla": frozenset({"women"}),
     "trendyolman": frozenset({"men"}),
-    "mangoman": frozenset({"men"}),
 }
 
 
@@ -456,39 +455,46 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 logger.error("Supabase connection/settings failed: %s", exc)
                 return 1
 
-    # Apply optional `--gender` CLI override for testing/manual runs
+    # Apply optional `--gender` CLI override for notification/strict-filter testing
     gender_override = getattr(args, "gender", None)
     if gender_override:
         override_genders = _parse_gender_cli_arg(gender_override)
         user_settings = user_settings.model_copy(update={"target_genders": override_genders})
-        logger.info("Overriding target_genders via --gender CLI flag: %s", user_settings.target_genders)
-
-    # Smart brand skipping based on target_genders (e.g. skip trendyolmilla if women not selected)
-    brands, skipped_gender_brands = _filter_brands_by_target_genders(brands, user_settings.target_genders)
-    if skipped_gender_brands:
         logger.info(
-            "Skipped %d brand(s) incompatible with target_genders=%s: %s",
-            len(skipped_gender_brands),
-            user_settings.target_genders,
-            ", ".join(skipped_gender_brands),
-        )
-    if not brands:
-        logger.warning(
-            "No brands left after filtering for target_genders=%s; exiting cleanly.",
+            "Overriding notification target_genders via --gender CLI flag: %s",
             user_settings.target_genders,
         )
-        return 0
 
-    raw_section = getattr(args, "section", "auto")
+    # Always scrape all genders (`all`) by default so the catalog has full Men, Women, and
+    # Unisex coverage. `user_settings.target_genders` is strictly scoped to Web Push / AI
+    # notification filtering and never restricts scraping or DB catalog ingestion.
+    raw_section = getattr(args, "section", "all")
     effective_section: Literal["all", "men", "women"] = (
-        user_settings.to_scraper_section()
-        if not raw_section or raw_section == "auto"
-        else raw_section
+        "all" if not raw_section or raw_section == "auto" else raw_section
     )
+
+    if effective_section in {"men", "women"}:
+        brands, skipped_gender_brands = _filter_brands_by_target_genders(
+            brands, [effective_section]
+        )
+        if skipped_gender_brands:
+            logger.info(
+                "Skipped %d brand(s) incompatible with explicit --section=%s: %s",
+                len(skipped_gender_brands),
+                effective_section,
+                ", ".join(skipped_gender_brands),
+            )
+        if not brands:
+            logger.warning(
+                "No brands left after filtering for explicit --section=%s; exiting cleanly.",
+                effective_section,
+            )
+            return 0
+
     logger.info(
-        "Active gender filter: target_genders=%s -> scraper section='%s'",
-        user_settings.target_genders,
+        "Scrape section='%s' (catalog covers all scraped genders) | Notification target_genders=%s",
         effective_section,
+        user_settings.target_genders,
     )
 
     run_mode = ScrapeRunMode(
@@ -1058,15 +1064,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gender",
         default=None,
         help=(
-            "Test/geçici geçersiz kılma için hedef cinsiyet(ler): men, women, unisex, all "
-            "veya virgülle ayrılmış liste (ör. men,unisex). Belirtilmezse Supabase user_settings.target_genders okunur."
+            "Bildirim / sıkı filtre için geçici hedef cinsiyet(ler): men, women, unisex, all "
+            "veya virgülle ayrılmış liste (ör. men,unisex). Veritabanı taramasını kısıtlamaz; "
+            "belirtilmezse Supabase user_settings.target_genders okunur."
         ),
     )
     parser.add_argument(
         "--section",
-        choices=("auto", "all", "men", "women"),
-        default="auto",
-        help="Taranacak reyon: auto (user_settings.target_genders'a göre otomatik), all, men veya women (varsayılan: auto)",
+        choices=("all", "auto", "men", "women"),
+        default="all",
+        help="Taranacak reyon: all (hem Erkek hem Kadın — varsayılan), auto (all ile eşdeğer), men veya women.",
     )
     parser.add_argument(
         "--dry-run",

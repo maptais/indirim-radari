@@ -91,9 +91,30 @@ function clampInteger(
   return Math.min(max, Math.max(min, Math.trunc(numeric)));
 }
 
+function canonicalizeGenderToken(raw: unknown): ProductGender | null {
+  const cleaned = String(raw ?? "")
+    .trim()
+    .toLocaleLowerCase("tr-TR")
+    .replace(/ı/g, "i");
+  if (cleaned === "men" || cleaned === "man" || cleaned === "erkek") {
+    return "men";
+  }
+  if (
+    cleaned === "women" ||
+    cleaned === "woman" ||
+    cleaned === "kadin" ||
+    cleaned === "bayan"
+  ) {
+    return "women";
+  }
+  if (cleaned === "unisex") {
+    return "unisex";
+  }
+  return null;
+}
+
 function normalizeGender(raw: unknown): ProductGender {
-  const cleaned = String(raw ?? "").trim().toLowerCase() as ProductGender;
-  return VALID_GENDERS.has(cleaned) ? cleaned : "unisex";
+  return canonicalizeGenderToken(raw) ?? "unisex";
 }
 
 function normalizeTargetGenders(raw: unknown): ProductGender[] {
@@ -101,8 +122,8 @@ function normalizeTargetGenders(raw: unknown): ProductGender[] {
   const seen = new Set<ProductGender>();
   const result: ProductGender[] = [];
   for (const item of raw) {
-    const val = String(item ?? "").trim().toLowerCase() as ProductGender;
-    if (VALID_GENDERS.has(val) && !seen.has(val)) {
+    const val = canonicalizeGenderToken(item);
+    if (val && VALID_GENDERS.has(val) && !seen.has(val)) {
       seen.add(val);
       result.push(val);
     }
@@ -242,10 +263,8 @@ function resolveAllowedGenders(
 
   const parsed = trimmed
     .split(",")
-    .map((part) => part.trim().toLowerCase())
-    .filter((part): part is ProductGender =>
-      VALID_GENDERS.has(part as ProductGender)
-    );
+    .map((part) => canonicalizeGenderToken(part))
+    .filter((part): part is ProductGender => part !== null && VALID_GENDERS.has(part));
 
   if (parsed.length === 0) {
     return new Set<ProductGender>(fallbackGenders);

@@ -70,7 +70,7 @@ class HMScraper(BaseScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 4,
+        max_categories: int = 6,
         max_pages_per_category: int = 10,
         page_size: int = 72,
         max_retries: int = 2,
@@ -307,6 +307,11 @@ class HMScraper(BaseScraper):
         """Fetch discounted H&M Turkey products from Search Services JSON API."""
         specs = HM_CATEGORY_SPECS.get(self.section) or HM_CATEGORY_SPECS["all"]
         selected_specs = list(specs[: self.max_categories])
+        effective_max_pages = (
+            min(self.max_pages_per_category, 8)
+            if self.section == "all" and len(selected_specs) >= 5
+            else self.max_pages_per_category
+        )
 
         products_by_id: dict[str, ProductItem] = {}
         failures = 0
@@ -324,7 +329,7 @@ class HMScraper(BaseScraper):
 
             spec_failed = False
             consecutive_empty_pages = 0
-            for page in range(1, self.max_pages_per_category + 1):
+            for page in range(1, effective_max_pages + 1):
                 if self.is_budget_exceeded():
                     break
                 if page > 1:

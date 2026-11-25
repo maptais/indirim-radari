@@ -24,6 +24,7 @@ from ...core.http import (
     clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
+    interleave_by_gender,
     is_kids_product,
     parse_try_price,
     resolve_cart_promo,
@@ -503,6 +504,11 @@ class MaviScraper(BaseScraper):
         """Fetch discounted Mavi products from outlet & discount-sorted pages."""
         paths = MAVI_CATEGORY_PATHS.get(self.section) or MAVI_CATEGORY_PATHS["all"]
         selected_paths = list(paths[: self.max_categories])
+        effective_max_pages = (
+            min(self.max_pages_per_category, 8)
+            if self.section == "all" and len(selected_paths) >= 4
+            else self.max_pages_per_category
+        )
 
         candidates: list[tuple[dict[str, Any], str, float]] = []
         seen_codes: set[str] = set()
@@ -521,7 +527,7 @@ class MaviScraper(BaseScraper):
 
             cat_failed = False
             consecutive_empty_pages = 0
-            for page in range(self.max_pages_per_category):
+            for page in range(effective_max_pages):
                 if self.is_budget_exceeded(reserve_seconds=25.0):
                     break
                 if page > 0:
@@ -579,6 +585,11 @@ class MaviScraper(BaseScraper):
             raise RuntimeError(f"All {len(selected_paths)} Mavi categories failed")
 
         candidates.sort(key=lambda item: -item[2])
+        if self.section == "all":
+            candidates = interleave_by_gender(
+                candidates,
+                lambda item: self._infer_gender(item[0], item[1]),
+            )
         logger.info(
             "[%s] Collected %d discounted listing candidates across %d categories",
             self.brand,

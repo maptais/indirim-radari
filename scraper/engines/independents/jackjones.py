@@ -24,6 +24,7 @@ from ...core.http import (
     clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
+    interleave_by_gender,
     is_kids_product,
     parse_try_price,
     resolve_cart_promo,
@@ -439,6 +440,11 @@ class JackJonesScraper(BaseScraper):
         """Fetch discounted Jack & Jones Turkey products and PDP size availability."""
         paths = JACKJONES_CATEGORY_PATHS.get(self.section) or JACKJONES_CATEGORY_PATHS["all"]
         selected_paths = list(paths[: self.max_categories])
+        effective_max_pages = (
+            min(self.max_pages_per_category, 8)
+            if self.section == "all" and len(selected_paths) >= 4
+            else self.max_pages_per_category
+        )
 
         candidates: list[tuple[dict[str, Any], str, float]] = []
         seen_ids: set[str] = set()
@@ -457,7 +463,7 @@ class JackJonesScraper(BaseScraper):
 
             cat_failed = False
             consecutive_empty_pages = 0
-            for page in range(1, self.max_pages_per_category + 1):
+            for page in range(1, effective_max_pages + 1):
                 if self.is_budget_exceeded(reserve_seconds=25.0):
                     break
                 if page > 1:
@@ -517,6 +523,11 @@ class JackJonesScraper(BaseScraper):
             raise RuntimeError(f"All {len(selected_paths)} Jack & Jones categories failed")
 
         candidates.sort(key=lambda entry: -entry[2])
+        if self.section == "all":
+            candidates = interleave_by_gender(
+                candidates,
+                lambda entry: self._infer_gender(entry[0], entry[1]),
+            )
         logger.info(
             "[%s] Collected %d discounted listing candidates across %d categories",
             self.brand,

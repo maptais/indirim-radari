@@ -24,6 +24,7 @@ from ..core.http import (
     clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
+    interleave_by_gender,
     is_conditional_promo,
     is_kids_product,
     parse_try_price,
@@ -121,7 +122,7 @@ class AkinonScraper(BaseScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 4,
+        max_categories: int = 5,
         max_pages_per_category: int = 10,
         max_detail_fetches: int = 28,
         fetch_variant_details: bool = True,
@@ -557,6 +558,11 @@ class AkinonScraper(BaseScraper):
         """Fetch discounted products and per-size availability from Akinon JSON endpoints."""
         paths = self.config.category_paths.get(self.section) or self.config.category_paths["all"]
         selected_paths = list(paths[: self.max_categories])
+        effective_max_pages = (
+            min(self.max_pages_per_category, 8)
+            if self.section == "all" and len(selected_paths) >= 4
+            else self.max_pages_per_category
+        )
 
         candidates: list[tuple[dict[str, Any], str]] = []
         seen_urls: set[str] = set()
@@ -575,7 +581,7 @@ class AkinonScraper(BaseScraper):
 
             cat_failed = False
             consecutive_empty_pages = 0
-            for page in range(1, self.max_pages_per_category + 1):
+            for page in range(1, effective_max_pages + 1):
                 if self.is_budget_exceeded(reserve_seconds=25.0):
                     logger.warning(
                         "[%s] Soft time budget reached on %s page %d (%d candidates collected).",
@@ -671,6 +677,11 @@ class AkinonScraper(BaseScraper):
             return 0.0
 
         candidates.sort(key=_discount_sort_key)
+        if self.section == "all":
+            candidates = interleave_by_gender(
+                candidates,
+                lambda entry: self._infer_gender(entry[0], entry[1]),
+            )
 
         products_by_id: dict[str, ProductItem] = {}
         detail_fetches = 0
@@ -731,7 +742,7 @@ class ErenScraper(AkinonScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 4,
+        max_categories: int = 5,
         max_pages_per_category: int = 10,
         max_detail_fetches: int = 28,
         fetch_variant_details: bool = True,

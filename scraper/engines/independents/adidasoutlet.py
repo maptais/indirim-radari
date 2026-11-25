@@ -20,6 +20,7 @@ from ...core.http import (
     HttpClient,
     infer_product_category,
     infer_product_gender,
+    interleave_by_gender,
     is_kids_product,
     parse_try_price,
 )
@@ -30,7 +31,13 @@ _CRITICAL_STOCK_THRESHOLD = 3
 _KIDS_MARKERS = ("çocuk", "cocuk", "kids", "junior", "bebek", "infant", "toddler")
 
 ADIDAS_OUTLET_QUERIES: dict[str, tuple[str, ...]] = {
-    "all": ("erkek-outlet-ayakkabi", "kadin-outlet-ayakkabi", "outlet"),
+    "all": (
+        "erkek-outlet-ayakkabi",
+        "kadin-outlet-ayakkabi",
+        "erkek-outlet",
+        "kadin-outlet",
+        "outlet",
+    ),
     "men": ("erkek-outlet-ayakkabi", "erkek-outlet"),
     "women": ("kadin-outlet-ayakkabi", "kadin-outlet"),
 }
@@ -55,7 +62,7 @@ class AdidasOutletScraper(BaseScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 3,
+        max_categories: int = 5,
         max_pages_per_category: int = 8,
         page_size: int = 48,
         max_detail_fetches: int = 28,
@@ -323,6 +330,12 @@ class AdidasOutletScraper(BaseScraper):
 
         if query_failures == len(selected_queries) and not candidates:
             raise RuntimeError(f"All {len(selected_queries)} Adidas Outlet queries failed")
+
+        if self.section == "all":
+            candidates = interleave_by_gender(
+                candidates,
+                lambda entry: self._infer_gender(entry[0], entry[1]),
+            )
 
         products: list[ProductItem] = []
         detail_count = 0

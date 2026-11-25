@@ -12,16 +12,23 @@ from pydantic import SecretStr
 
 from scraper.core.config import AppSettings, CategoryThreshold, UserSettings
 from scraper.core.filters import ProductFilter
-from scraper.core.http import infer_product_gender, is_kids_product
+from scraper.core.http import infer_product_gender, interleave_by_gender, is_kids_product
 from scraper.core.notifier import PushNotifier
 from scraper.core.price_analyzer import PriceAnalysis
 from scraper.engines.base import ProductCategory, ProductGender, ProductItem, ScrapeResult, ScrapeStatus
 from scraper.engines.eren import EREN_BRAND_CONFIGS
+from scraper.engines.independents.adidasoutlet import ADIDAS_OUTLET_QUERIES
+from scraper.engines.independents.barcin import BARCIN_CONFIG
+from scraper.engines.independents.defacto import DEFACTO_CATEGORY_PATHS
+from scraper.engines.independents.hm import HM_CATEGORY_SPECS
+from scraper.engines.independents.instreet import InStreetScraper
 from scraper.engines.independents.jackjones import JACKJONES_CATEGORY_PATHS
 from scraper.engines.independents.mavi import MAVI_CATEGORY_PATHS
+from scraper.engines.independents.pumaoutlet import PUMA_OUTLET_PATHS
 from scraper.engines.independents.sneaksup import SNEAKSUP_CATEGORY_PATHS
+from scraper.engines.independents.sportive import SPORTIVE_CONFIG
 from scraper.engines.inditex import INDITEX_BRAND_CONFIGS, InditexScraper, _CategoryNode
-from scraper.engines.mango import MangoScraper
+from scraper.engines.mango import MANGO_BRAND_CONFIGS, MangoScraper
 import scraper.main as main_mod
 
 
@@ -42,6 +49,13 @@ class TestGenderInferenceAndFiltering(unittest.TestCase):
         self.assertEqual(infer_product_gender("Kadın Saten Elbise"), ProductGender.WOMEN)
         # Ensure "woman" never falsely triggers "man"
         self.assertEqual(infer_product_gender("WOMAN > Special Prices"), ProductGender.WOMEN)
+        self.assertEqual(infer_product_gender("Nike Wmns Dunk Low Sneaker"), ProductGender.WOMEN)
+        self.assertEqual(infer_product_gender("Puma Cali Dream Wns"), ProductGender.WOMEN)
+        # Percent-encoded Turkish path segment (`Kad%C4%B1n`) must resolve cleanly to WOMEN
+        self.assertEqual(
+            infer_product_gender("", "/outlet/c/4?q=:sale:gender:Kad%C4%B1n"),
+            ProductGender.WOMEN,
+        )
         self.assertEqual(infer_product_gender("Unisex Beyaz Sneaker", "/erkek-ayakkabi/"), ProductGender.UNISEX)
         self.assertEqual(infer_product_gender("", "men_shirts_longsleeved"), ProductGender.MEN)
         self.assertEqual(infer_product_gender("", "ladies_sale"), ProductGender.WOMEN)
@@ -80,12 +94,14 @@ class TestGenderInferenceAndFiltering(unittest.TestCase):
         self.assertIn("mangoman", selected_men)
 
         selected_women, skipped_women = main_mod._filter_brands_by_target_genders(all_brands, ["women", "unisex"])
-        self.assertEqual(set(skipped_women), {"mangoman", "trendyolman"})
+        self.assertEqual(set(skipped_women), {"trendyolman"})
         self.assertIn("trendyolmilla", selected_women)
+        self.assertIn("mangoman", selected_women)
 
         selected_unisex, skipped_unisex = main_mod._filter_brands_by_target_genders(all_brands, ["unisex"])
-        self.assertEqual(set(skipped_unisex), {"mangoman", "trendyolman", "trendyolmilla"})
+        self.assertEqual(set(skipped_unisex), {"trendyolman", "trendyolmilla"})
         self.assertIn("zara", selected_unisex)
+        self.assertIn("mangoman", selected_unisex)
 
     def test_product_filter_and_notifier_gate_gender(self) -> None:
         settings = UserSettings(
@@ -125,7 +141,7 @@ class TestGenderInferenceAndFiltering(unittest.TestCase):
         self.assertFalse(ok_w)
         self.assertIn("gender_mismatch", reason_w)
 
-    def test_pipeline_excludes_wrong_gender_from_ai_db_and_push(self) -> None:
+    def test_pipeline_saves_all_genders_to_db_but_gates_ai_and_push_by_target_genders(self) -> None:
         men_item = ProductItem(
             brand="pullandbear",
             external_id="men-1",
@@ -152,6 +168,7 @@ class TestGenderInferenceAndFiltering(unittest.TestCase):
         class FakeDB:
             def __init__(self) -> None:
                 self.upserted_ids: list[str] = []
+                self.upserted_genders: dict[str, str] = {}
 
             def get_user_settings(self) -> UserSettings:
                 return UserSettings(
@@ -176,7 +193,9 @@ class TestGenderInferenceAndFiltering(unittest.TestCase):
                 return []
 
             def upsert_product(self, product: ProductItem, **_kwargs: Any) -> dict[str, Any]:
+                payload = product.to_db_payload()
                 self.upserted_ids.append(product.external_id)
+                self.upserted_genders[product.external_id] = str(payload["gender"])
                 return {"id": f"uuid-{product.external_id}", "ai_score": 9}
 
             def record_price_history(self, **_kwargs: Any) -> dict[str, Any]:
@@ -205,6 +224,11 @@ class TestGenderInferenceAndFiltering(unittest.TestCase):
 
         scored_ids: list[str] = []
         notified_ids: list[str] = []
+        built_calls: list[tuple[str, str]] = []
+
+        def fake_build_scraper(brand: str, **kwargs: Any) -> FakeScraper:
+            built_calls.append((brand, str(kwargs.get("section"))))
+            return FakeScraper()
 
         class FakeScorer:
             is_configured = True
@@ -236,22 +260,161 @@ class TestGenderInferenceAndFiltering(unittest.TestCase):
                 return SimpleNamespace(sent=1)
 
         fake_db = FakeDB()
-        args = main_mod.parse_args(["--brand", "pullandbear", "--run-mode", "cloud"])
-        self.assertEqual(args.section, "auto")
+        args = main_mod.parse_args(["--brand", "pullandbear,trendyolmilla", "--run-mode", "cloud"])
+        self.assertEqual(args.section, "all")
 
         with (
             patch.object(main_mod, "get_settings", return_value=_make_app_settings()),
             patch.object(main_mod, "DatabaseClient", return_value=fake_db),
-            patch.object(main_mod, "_build_scraper", return_value=FakeScraper()),
+            patch.object(main_mod, "_build_scraper", side_effect=fake_build_scraper),
             patch.object(main_mod, "AIStyleScorer", FakeScorer),
             patch.object(main_mod, "PushNotifier", FakeNotifier),
         ):
             rc = main_mod.run_pipeline(args)
 
         self.assertEqual(rc, 0)
-        self.assertEqual(fake_db.upserted_ids, ["men-1"])
-        self.assertEqual(scored_ids, ["men-1"])
-        self.assertEqual(notified_ids, ["men-1"])
+        # Both brands (including women-exclusive trendyolmilla) ran with section="all"
+        # even though user_settings.target_genders is ["men", "unisex"]!
+        self.assertEqual(built_calls, [("pullandbear", "all"), ("trendyolmilla", "all")])
+        # Both Men and Women items are persisted in Supabase with canonical gender values
+        self.assertEqual(fake_db.upserted_genders["men-1"], "men")
+        self.assertEqual(fake_db.upserted_genders["women-1"], "women")
+        self.assertIn("men-1", fake_db.upserted_ids)
+        self.assertIn("women-1", fake_db.upserted_ids)
+        # Only user_settings.target_genders ("men", "unisex") triggered AI scoring and Web Push
+        self.assertEqual(set(scored_ids), {"men-1"})
+        self.assertEqual(set(notified_ids), {"men-1"})
+
+    def test_dual_gender_balancing_across_inditex_mango_instreet_and_brand_configs(self) -> None:
+        # 1. interleave_by_gender keeps per-gender order while alternating men & women
+        sample = [
+            ("m1", ProductGender.MEN),
+            ("m2", ProductGender.MEN),
+            ("m3", ProductGender.MEN),
+            ("w1", ProductGender.WOMEN),
+            ("w2", ProductGender.WOMEN),
+        ]
+        interleaved = interleave_by_gender(sample, lambda pair: pair[1])
+        self.assertEqual([x[0] for x in interleaved[:4]], ["m1", "w1", "m2", "w2"])
+
+        # 2. Inditex _collect_categories interleaves women & men promo nodes within max_categories
+        zara = InditexScraper("zara", section="all", max_categories=4)
+        raw_tree = [
+            {
+                "id": 1,
+                "name": "ERKEK",
+                "nameEn": "MAN",
+                "subcategories": [
+                    {"id": 101, "name": "Özel Fiyatlar A", "key": "MAN-SPECIAL_PRICES-A", "subcategories": []},
+                    {"id": 102, "name": "Özel Fiyatlar B", "key": "MAN-SPECIAL_PRICES-B", "subcategories": []},
+                    {"id": 103, "name": "Özel Fiyatlar C", "key": "MAN-SPECIAL_PRICES-C", "subcategories": []},
+                    {"id": 104, "name": "Özel Fiyatlar D", "key": "MAN-SPECIAL_PRICES-D", "subcategories": []},
+                ],
+            },
+            {
+                "id": 2,
+                "name": "KADIN",
+                "nameEn": "WOMAN",
+                "subcategories": [
+                    {"id": 201, "name": "Özel Fiyatlar Elbise", "key": "WOMAN-SPECIAL_PRICES-A", "subcategories": []},
+                    {"id": 202, "name": "Özel Fiyatlar Ceket", "key": "WOMAN-SPECIAL_PRICES-B", "subcategories": []},
+                ],
+            },
+        ]
+        chosen = zara._collect_categories(raw_tree)
+        self.assertEqual(len(chosen), 4)
+        chosen_genders = [infer_product_gender(c.section_hint, c.path) for c in chosen]
+        self.assertEqual(chosen_genders.count(ProductGender.MEN), 2)
+        self.assertEqual(chosen_genders.count(ProductGender.WOMEN), 2)
+        zara.close()
+
+        # 3. Mango (`mangoman` on shop.mango.com) discovers & interleaves both erkek and kadin
+        self.assertIn("/tr/tr/h/erkek", MANGO_BRAND_CONFIGS["mangoman"].home_paths["all"])
+        self.assertIn("/tr/tr/h/kadin", MANGO_BRAND_CONFIGS["mangoman"].home_paths["all"])
+        mango = MangoScraper("mangoman", section="all", max_categories=4, fetch_variant_details=False)
+        fake_erkek_html = '"/tr/tr/c/erkek/indirim/111111" "/tr/tr/c/erkek/ceket/222222" "/tr/tr/c/erkek/kazak/333333"'
+        fake_kadin_html = '"/tr/tr/c/kadin/indirim/444444" "/tr/tr/c/kadin/elbise/555555" "/tr/tr/c/kadin/ceket/666666"'
+        with patch.object(
+            mango.http,
+            "get_text",
+            side_effect=lambda url, **_kw: fake_kadin_html if "/kadin" in url else fake_erkek_html,
+        ):
+            discovered = mango._discover_category_paths()
+        self.assertEqual(len(discovered), 4)
+        self.assertTrue(any("/erkek/" in p for p in discovered))
+        self.assertTrue(any("/kadin/" in p for p in discovered))
+        # Women product parsed from Mango gets ProductGender.WOMEN (never forced to MEN)
+        women_entry = {
+            "defaultColorId": "01",
+            "product": {
+                "name": "Keten Midi Elbise",
+                "reference": "99999999",
+                "url": "/tr/tr/p/kadin/elbise/keten-midi-elbise/99999999",
+                "colors": [{"id": "01", "sizes": [{"label": "S"}]}],
+            },
+            "prices": {"01": {"default": {"price": 1200.0, "previousPrice": 2400.0}}},
+        }
+        women_item = mango.parse_plp_entry(women_entry, category_path="/tr/tr/c/kadin/elbise/555555")
+        self.assertIsNotNone(women_item)
+        assert women_item is not None
+        self.assertEqual(women_item.gender, ProductGender.WOMEN)
+        mango.close()
+
+        # 4. In Street (`section="all"`) explicitly queries both `erkek` and `kadin`
+        instreet = InStreetScraper(section="all", max_pages=2, min_jitter_seconds=0.0, max_jitter_seconds=0.0)
+        queried_genders: list[str] = []
+
+        def fake_instreet_json(_url: str, *, params: dict[str, Any] | None = None, **_kw: Any) -> dict[str, Any]:
+            g = str((params or {}).get("cinsiyet") or "")
+            queried_genders.append(g)
+            return {
+                "pagination": {"totalPages": 1},
+                "products": [
+                    {
+                        "brandName": "Nike",
+                        "sku": f"IS-{g}-1",
+                        "name": "Air Sneaker",
+                        "price": 1500,
+                        "oldPrice": 3000,
+                        "relativeUrl": f"/urun/nike-air-{g}",
+                        "isInStock": True,
+                        "options": [{"option_value": "38" if g == "kadin" else "42", "is_in_stock": True, "qty": 4}],
+                    }
+                ],
+            }
+
+        with patch.object(instreet.http, "get_json", side_effect=fake_instreet_json):
+            is_items = instreet.fetch_products()
+        self.assertEqual(queried_genders, ["erkek", "kadin"])
+        self.assertEqual({item.gender for item in is_items}, {ProductGender.MEN, ProductGender.WOMEN})
+        instreet.close()
+
+        # 5. Every dual-gender brand config explicitly includes both men and women paths under "all"
+        for slug, cfg in EREN_BRAND_CONFIGS.items():
+            joined = " ".join(cfg.category_paths["all"])
+            self.assertIn("erkek", joined, f"{slug} missing erkek in all")
+            self.assertIn("kadin", joined, f"{slug} missing kadin in all")
+
+        for name, paths in (
+            ("barcin", BARCIN_CONFIG.category_paths["all"]),
+            ("sportive", SPORTIVE_CONFIG.category_paths["all"]),
+            ("defacto", DEFACTO_CATEGORY_PATHS["all"]),
+            ("mavi", MAVI_CATEGORY_PATHS["all"]),
+            ("jackjones", JACKJONES_CATEGORY_PATHS["all"]),
+            ("sneaksup", SNEAKSUP_CATEGORY_PATHS["all"]),
+            ("adidasoutlet", ADIDAS_OUTLET_QUERIES["all"]),
+            ("pumaoutlet", PUMA_OUTLET_PATHS["all"]),
+        ):
+            joined = " ".join(paths)
+            self.assertIn("erkek", joined.lower(), f"{name} missing erkek in all")
+            self.assertTrue(
+                "kadin" in joined.lower() or "kad%c4%b1n" in joined.lower(),
+                f"{name} missing kadin in all",
+            )
+
+        hm_joined = " ".join(spec[0] for spec in HM_CATEGORY_SPECS["all"])
+        self.assertIn("/men/", hm_joined)
+        self.assertIn("/ladies/", hm_joined)
 
 
 class TestCloudBrandFixes(unittest.TestCase):

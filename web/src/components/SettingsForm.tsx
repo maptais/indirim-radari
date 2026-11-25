@@ -297,10 +297,12 @@ export function SettingsForm({
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-300" />
           <p>
             <strong className="font-semibold text-sky-200">
-              Genel Tarama ve Bildirim Ayarları:
+              Ortak Bildirim ve Varsayılan Filtre Ayarları:
             </strong>{" "}
-            Bu sayfadaki değişiklikler ortak veritabanını, arka plan tarayıcısını
-            ve Web Push bildirim kurallarını günceller. Yalnızca kendi cihazınız
+            Arka plan tarayıcısı tüm markalarda her zaman hem Erkek hem Kadın
+            (ve Unisex) ürünlerini veritabanına tarar. Bu sayfadaki tercihler
+            Web Push bildirim kurallarını, AI bildirim puanlamasını ve yeni
+            cihazların başlangıç filtresini belirler. Yalnızca kendi cihazınız
             için bağımsız beden/cinsiyet filtrelemek isterseniz{" "}
             <Link
               href="/"
@@ -343,13 +345,14 @@ export function SettingsForm({
               <div className="flex items-center gap-2">
                 <Users className="h-4 w-4 text-emerald-400" />
                 <h2 className="text-base font-semibold text-zinc-100">
-                  Cinsiyet Tercihi
+                  Bildirim Cinsiyet Tercihi
                 </h2>
               </div>
               <p className="text-xs leading-relaxed text-zinc-400">
-                Tarayıcı, AI puanlama, bildirimler ve ana sayfa akışı seçtiğiniz
-                reyonlara göre otomatik filtrelenir (en az bir seçenek aktif
-                olmalıdır).
+                Veritabanı taraması her zaman tüm markalarda Erkek, Kadın ve
+                Unisex ürünlerini kapsar. Buradaki seçim yalnızca hangi
+                cinsiyetten Web Push bildirimi gönderileceğini (ve AI bildirim
+                puanlamasını) belirler (en az bir seçenek aktif olmalıdır).
               </p>
 
               <div className="grid grid-cols-3 gap-2.5">

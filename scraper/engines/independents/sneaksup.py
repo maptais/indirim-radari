@@ -45,6 +45,7 @@ SNEAKSUP_CATEGORY_PATHS: dict[str, tuple[str, ...]] = {
         "/erkek-ayakkabi-sneaker",
         "/kadin-ayakkabi-sneaker",
         "/erkek-ayakkabi-kosu-ayakkabisi",
+        "/kadin-ayakkabi",
     ),
     "men": (
         "/sneaks-out-erkek",
@@ -73,7 +74,7 @@ class SneaksUpScraper(BaseScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 4,
+        max_categories: int = 7,
         max_pages_per_category: int = 12,
         max_retries: int = 2,
         impersonate: str | None = None,
@@ -317,6 +318,11 @@ class SneaksUpScraper(BaseScraper):
         """Fetch discounted products with live variant stock from Sneaks Up category pages."""
         paths = SNEAKSUP_CATEGORY_PATHS.get(self.section) or SNEAKSUP_CATEGORY_PATHS["all"]
         selected_paths = list(paths[: self.max_categories])
+        effective_max_pages = (
+            min(self.max_pages_per_category, 8)
+            if self.section == "all" and len(selected_paths) >= 5
+            else self.max_pages_per_category
+        )
 
         products_by_id: dict[str, ProductItem] = {}
         failures = 0
@@ -334,7 +340,7 @@ class SneaksUpScraper(BaseScraper):
 
             cat_failed = False
             consecutive_empty_pages = 0
-            for page_idx in range(1, self.max_pages_per_category + 1):
+            for page_idx in range(1, effective_max_pages + 1):
                 if self.is_budget_exceeded():
                     break
                 if page_idx > 1:

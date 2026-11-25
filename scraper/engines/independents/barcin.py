@@ -12,7 +12,7 @@ BARCIN_CONFIG = AkinonBrandConfig(
     display_name="Barçın",
     domain="www.barcin.com",
     category_paths={
-        "all": ("/indirim/", "/outlet/", "/spor-ayakkabi/"),
+        "all": ("/indirim/", "/outlet/", "/erkek/", "/kadin/", "/spor-ayakkabi/"),
         "men": ("/indirim/", "/outlet/", "/erkek/"),
         "women": ("/indirim/", "/outlet/", "/kadin/"),
     },
@@ -31,7 +31,7 @@ class BarcinScraper(AkinonScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 3,
+        max_categories: int = 5,
         max_pages_per_category: int = 10,
         max_detail_fetches: int = 24,
         fetch_variant_details: bool = True,

@@ -12,7 +12,13 @@ SPORTIVE_CONFIG = AkinonBrandConfig(
     display_name="Sportive",
     domain="www.sportive.com.tr",
     category_paths={
-        "all": ("/outlet/", "/erkek-spor-ayakkabi/", "/kadin-spor-ayakkabi/"),
+        "all": (
+            "/outlet/",
+            "/erkek-spor-ayakkabi/",
+            "/kadin-spor-ayakkabi/",
+            "/erkek-giyim/",
+            "/kadin-giyim/",
+        ),
         "men": ("/outlet/", "/erkek-spor-ayakkabi/", "/erkek-giyim/"),
         "women": ("/outlet/", "/kadin-spor-ayakkabi/", "/kadin-giyim/"),
     },
@@ -31,7 +37,7 @@ class SportiveScraper(AkinonScraper):
         *,
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
-        max_categories: int = 3,
+        max_categories: int = 5,
         max_pages_per_category: int = 10,
         max_detail_fetches: int = 24,
         fetch_variant_details: bool = True,

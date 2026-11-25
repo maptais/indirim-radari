@@ -26,6 +26,7 @@ from ...core.http import (
     clean_promo_badge_text,
     infer_product_category,
     infer_product_gender,
+    interleave_by_gender,
     is_kids_product,
     parse_try_price,
     resolve_cart_promo,
@@ -410,6 +411,11 @@ class PumaOutletScraper(BaseScraper):
             return 0.0
 
         candidates.sort(key=_discount_sort_key)
+        if self.section == "all":
+            candidates = interleave_by_gender(
+                candidates,
+                lambda card: self._infer_gender(card.title, card.url, card.category_path),
+            )
 
         products: list[ProductItem] = []
         detail_fetches = 0

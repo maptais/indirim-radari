@@ -8,10 +8,11 @@ import re
 import shutil
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+from urllib.parse import unquote
 
 import certifi
 from curl_cffi import requests as curl_requests
@@ -385,16 +386,17 @@ _UNISEX_HINT_RE = re.compile(r"(?<![a-zçğıöşü])unisex(?![a-zçğıöşü])
 
 _WOMEN_HINT_RE = re.compile(
     r"(?<![a-zçğıöşü])(?:"
-    r"kadın|kadin|woman|women|womens|ladies|lady|mujer|señora|senora|bayan|jjxx|"
+    r"kadın(?:lar)?|kadin(?:lar)?|woman|women|womens|wmns|wmn|wns|female|"
+    r"ladies|lady|mujer|señora|senora|femme|donna|bayan|jjxx|"
     r"elbise|etek|bluz|büstiyer|bustiyer|sütyen|sutyen|bralet|topuklu|babet|hamile|"
-    r"crop\s*top|tulum|tesettür|tesettur|korseli|tayt|bikini|mayokini|pareo|saten\s+elbise"
+    r"crop\s*top|tulum|tesettür|tesettur|korseli|tayt|bikini|mayokini|pareo|saten\s+elbise|tunik"
     r")(?![a-zçğıöşü])",
     re.IGNORECASE,
 )
 
 _MEN_HINT_RE = re.compile(
     r"(?<![a-zçğıöşü])(?:"
-    r"erkek|men|mens|man|hombre|caballero|bay"
+    r"erkek(?:ler)?|men|mens|man|male|hombre|homme|uomo|caballero|bay"
     r")(?![a-zçğıöşü])",
     re.IGNORECASE,
 )
@@ -402,7 +404,7 @@ _MEN_HINT_RE = re.compile(
 
 def is_kids_product(*hints: str) -> bool:
     """Return True if any hint indicates a kids/baby/junior product."""
-    combined = turkish_lower(" ".join(h for h in hints if h))
+    combined = turkish_lower(" ".join(unquote(str(h)) for h in hints if h))
     if not combined:
         return False
     return bool(_KIDS_HINT_RE.search(combined))
@@ -421,11 +423,11 @@ def infer_product_gender(
     for raw_hint in hints:
         if not raw_hint:
             continue
-        cleaned = turkish_lower(str(raw_hint))
+        cleaned = turkish_lower(unquote(str(raw_hint)))
         if not cleaned:
             continue
         # Normalize path/slug separators so tokens like `men_shirts` or `/erkek-ayakkabi/` match boundaries
-        tokenized = re.sub(r"[/_\-\.,:|>]+", " ", cleaned)
+        tokenized = re.sub(r"[/_\-\.,:|>?=&]+", " ", cleaned)
 
         if _UNISEX_HINT_RE.search(tokenized):
             return ProductGender.UNISEX
@@ -444,6 +446,43 @@ def infer_product_gender(
     if saw_both:
         return ProductGender.UNISEX
     return default
+
+
+_T = TypeVar("_T")
+
+
+def interleave_by_gender(
+    items: list[_T],
+    gender_fn: Callable[[_T], ProductGender],
+) -> list[_T]:
+    """Round-robin interleave items across `men`, `women`, and `unisex` buckets.
+
+    Preserves relative order within each bucket so dual-gender category scans and
+    bounded PDP detail fetches never starve either gender.
+    """
+    men_bucket: list[_T] = []
+    women_bucket: list[_T] = []
+    other_bucket: list[_T] = []
+    for item in items:
+        gender = gender_fn(item)
+        if gender == ProductGender.MEN:
+            men_bucket.append(item)
+        elif gender == ProductGender.WOMEN:
+            women_bucket.append(item)
+        else:
+            other_bucket.append(item)
+
+    buckets = [b for b in (men_bucket, women_bucket, other_bucket) if b]
+    if len(buckets) <= 1:
+        return list(items)
+
+    interleaved: list[_T] = []
+    max_len = max(len(b) for b in buckets)
+    for idx in range(max_len):
+        for bucket in buckets:
+            if idx < len(bucket):
+                interleaved.append(bucket[idx])
+    return interleaved
 
 
 # ----------------------------------------------------------------------------

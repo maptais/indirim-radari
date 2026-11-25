@@ -81,7 +81,12 @@ class InStreetScraper(BaseScraper):
         self.http.close()
 
     @staticmethod
-    def _infer_gender(raw: dict[str, Any], full_title: str) -> ProductGender:
+    def _infer_gender(
+        raw: dict[str, Any],
+        full_title: str,
+        *,
+        section_hint: str = "",
+    ) -> ProductGender:
         breadcrumb_names = " ".join(
             str(b.get("name") or "")
             for b in (raw.get("breadcrumb") or [])
@@ -92,10 +97,17 @@ class InStreetScraper(BaseScraper):
             full_title,
             breadcrumb_names,
             str(raw.get("relativeUrl") or ""),
+            section_hint,
             default=ProductGender.UNISEX,
         )
 
-    def _matches_section(self, raw: dict[str, Any], full_title: str) -> bool:
+    def _matches_section(
+        self,
+        raw: dict[str, Any],
+        full_title: str,
+        *,
+        section_hint: str = "",
+    ) -> bool:
         breadcrumb_names = " ".join(
             str(b.get("name") or "")
             for b in (raw.get("breadcrumb") or [])
@@ -106,7 +118,7 @@ class InStreetScraper(BaseScraper):
         if self.section == "all":
             return True
 
-        gender = self._infer_gender(raw, full_title)
+        gender = self._infer_gender(raw, full_title, section_hint=section_hint)
         if gender == ProductGender.UNISEX:
             return True
         if self.section == "men":
@@ -164,7 +176,12 @@ class InStreetScraper(BaseScraper):
             promo_badge=chosen_badge,
         )
 
-    def parse_product(self, raw: dict[str, Any]) -> ProductItem | None:
+    def parse_product(
+        self,
+        raw: dict[str, Any],
+        *,
+        section_hint: str = "",
+    ) -> ProductItem | None:
         """Normalize a single In Street webservice product object into `ProductItem`."""
         if raw.get("isInStock") is False:
             return None
@@ -179,7 +196,7 @@ class InStreetScraper(BaseScraper):
         else:
             full_title = raw_name
 
-        if not self._matches_section(raw, full_title):
+        if not self._matches_section(raw, full_title, section_hint=section_hint):
             return None
 
         current_price = parse_try_price(raw.get("price"))
@@ -247,7 +264,7 @@ class InStreetScraper(BaseScraper):
             default=ProductCategory.SHOES,
         )
 
-        inferred_gender = self._infer_gender(raw, full_title)
+        inferred_gender = self._infer_gender(raw, full_title, section_hint=section_hint)
 
         return ProductItem(
             brand=self.brand,
@@ -275,75 +292,101 @@ class InStreetScraper(BaseScraper):
     def fetch_products(self) -> list[ProductItem]:
         """Fetch discounted products with live size stock from In Street's JSON list API."""
         products_by_id: dict[str, ProductItem] = {}
-        pages_to_scan = self.max_pages
 
-        gender_param: str | None = None
         if self.section == "men":
-            gender_param = "erkek"
+            gender_queries: tuple[str, ...] = ("erkek",)
+            pages_per_query = self.max_pages
         elif self.section == "women":
-            gender_param = "kadin"
+            gender_queries = ("kadin",)
+            pages_per_query = self.max_pages
+        else:
+            # Explicitly query both men and women feeds so neither gender can starve the other
+            gender_queries = ("erkek", "kadin")
+            pages_per_query = max(1, (self.max_pages + 1) // 2)
 
-        page_failures = 0
-        consecutive_empty_pages = 0
-        for page in range(1, pages_to_scan + 1):
+        query_failures = 0
+        for q_idx, gender_param in enumerate(gender_queries):
             if self.is_budget_exceeded():
                 logger.warning(
-                    "[%s] Soft time budget reached at page %d (%d products kept).",
+                    "[%s] Soft time budget reached before %s feed (%d products kept).",
                     self.brand,
-                    page,
+                    gender_param,
                     len(products_by_id),
                 )
                 break
-            if page > 1:
+            if q_idx > 0:
                 self.sleep_jitter()
 
-            params: dict[str, Any] = {
-                "uri": "indirim",
-                "newCategoryOrder": 1,
-                "responseProfile": "compact",
-                "page": page,
-            }
-            if gender_param:
-                params["cinsiyet"] = gender_param
-
-            try:
-                payload = self.http.get_json(f"{self.base_url}/webservice/v1/list", params=params)
-            except ScraperBlockedError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                page_failures += 1
-                logger.warning("[%s] Listing page %d failed: %s", self.brand, page, exc)
-                if page == 1:
+            q_failed = False
+            consecutive_empty_pages = 0
+            for page in range(1, pages_per_query + 1):
+                if self.is_budget_exceeded():
+                    logger.warning(
+                        "[%s] Soft time budget reached at %s page %d (%d products kept).",
+                        self.brand,
+                        gender_param,
+                        page,
+                        len(products_by_id),
+                    )
                     break
-                continue
+                if page > 1:
+                    self.sleep_jitter()
 
-            raw_products = payload.get("products") or []
-            if not raw_products:
-                break
+                params: dict[str, Any] = {
+                    "uri": "indirim",
+                    "newCategoryOrder": 1,
+                    "responseProfile": "compact",
+                    "page": page,
+                    "cinsiyet": gender_param,
+                }
 
-            new_in_page = 0
-            for raw_prod in raw_products:
-                if not isinstance(raw_prod, dict):
+                try:
+                    payload = self.http.get_json(f"{self.base_url}/webservice/v1/list", params=params)
+                except ScraperBlockedError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[%s] Listing %s page %d failed: %s",
+                        self.brand,
+                        gender_param,
+                        page,
+                        exc,
+                    )
+                    if page == 1:
+                        q_failed = True
+                        break
                     continue
-                item = self.parse_product(raw_prod)
-                if item is not None and item.external_id not in products_by_id:
-                    products_by_id[item.external_id] = item
-                    new_in_page += 1
 
-            if new_in_page == 0:
-                consecutive_empty_pages += 1
-                if consecutive_empty_pages >= 2:
+                raw_products = payload.get("products") or []
+                if not raw_products:
                     break
-            else:
-                consecutive_empty_pages = 0
 
-            pagination = payload.get("pagination") or {}
-            total_pages = int(pagination.get("totalPages") or 1)
-            if page >= total_pages:
-                break
+                new_in_page = 0
+                for raw_prod in raw_products:
+                    if not isinstance(raw_prod, dict):
+                        continue
+                    item = self.parse_product(raw_prod, section_hint=gender_param)
+                    if item is not None and item.external_id not in products_by_id:
+                        products_by_id[item.external_id] = item
+                        new_in_page += 1
 
-        if page_failures > 0 and not products_by_id:
-            raise RuntimeError(f"In Street listing failed across {page_failures} page(s)")
+                if new_in_page == 0:
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= 2:
+                        break
+                else:
+                    consecutive_empty_pages = 0
+
+                pagination = payload.get("pagination") or {}
+                total_pages = int(pagination.get("totalPages") or 1)
+                if page >= total_pages:
+                    break
+
+            if q_failed:
+                query_failures += 1
+
+        if query_failures == len(gender_queries) and not products_by_id:
+            raise RuntimeError(f"In Street listing failed across all {len(gender_queries)} gender feed(s)")
 
         logger.info("[%s] Fetched %d discounted products", self.brand, len(products_by_id))
         return list(products_by_id.values())

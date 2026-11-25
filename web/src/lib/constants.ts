@@ -24,7 +24,7 @@ export const BRAND_CATALOG: BrandMeta[] = [
   { slug: "occasion", label: "Occasion", group: "Eren Perakende", defaultRunMode: "cloud" },
   { slug: "fashfed", label: "FashFed", group: "Eren Perakende", defaultRunMode: "cloud" },
   // Mango (2)
-  { slug: "mangoman", label: "Mango Man", group: "Mango", defaultRunMode: "cloud" },
+  { slug: "mangoman", label: "Mango", group: "Mango", defaultRunMode: "cloud" },
   { slug: "mangooutlet", label: "Mango Outlet", group: "Mango", defaultRunMode: "local" },
   // Trendyol (2)
   { slug: "trendyolmilla", label: "Trendyol Milla", group: "Trendyol", defaultRunMode: "cloud" },
@@ -78,7 +78,7 @@ export const BRAND_LABELS: Record<string, string> = {
   superstep: "SuperStep",
   occasion: "Occasion",
   fashfed: "FashFed",
-  mangoman: "Mango Man",
+  mangoman: "Mango",
   mangooutlet: "Mango Outlet",
   trendyolmilla: "Trendyol Milla",
   trendyolman: "Trendyol Man",

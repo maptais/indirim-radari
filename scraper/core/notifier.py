@@ -32,7 +32,7 @@ BRAND_DISPLAY_NAMES: dict[str, str] = {
     "superstep": "SuperStep",
     "occasion": "Occasion",
     "fashfed": "FashFed",
-    "mangoman": "Mango Man",
+    "mangoman": "Mango",
     "mangooutlet": "Mango Outlet",
     "trendyolmilla": "Trendyol Milla",
     "trendyolman": "Trendyol Man",

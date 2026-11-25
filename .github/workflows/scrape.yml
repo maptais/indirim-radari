@@ -21,15 +21,15 @@ on:
           - all
           - local
       section:
-        description: "Taranacak reyon (auto: Ayarlar'daki target_genders tercihine göre otomatik)"
+        description: "Taranacak reyon (all: tüm markalarda hem Erkek hem Kadın + Unisex; Ayarlar cinsiyeti yalnızca bildirimleri filtreler)"
         required: false
-        default: "auto"
+        default: "all"
         type: choice
         options:
-          - auto
           - all
           - men
           - women
+          - auto
       max_categories:
         description: "Marka başına maksimum kategori sayısı"
         required: false
@@ -77,7 +77,7 @@ jobs:
             # 20 aktif cloud markasını çakışmasız 5 paralel gruba böl:
             # 1) inditex (5): zara, pullandbear, bershka, lefties, massimodutti
             # 2) eren (3): superstep, occasion, fashfed
-            # 3) mango,trendyol (3 cloud): mangoman, trendyolmilla, trendyolman
+            # 3) mango,trendyol (3 cloud): mangoman (Erkek+Kadın), trendyolmilla (Kadın), trendyolman (Erkek)
             # 4) independent_clothing (4): hm, defacto, mavi, jackjones
             # 5) independent_shoes (5 cloud): instreet, sneaksup, barcin, sportive, pumaoutlet
             TARGETS='["inditex","eren","mango,trendyol","independent_clothing","independent_shoes"]'
@@ -143,7 +143,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
           MATRIX_TARGET: ${{ matrix.target }}
           INPUT_TARGET_MODE: ${{ github.event.inputs.target_mode || 'cloud' }}
-          INPUT_SECTION: ${{ github.event.inputs.section || 'auto' }}
+          INPUT_SECTION: ${{ github.event.inputs.section || 'all' }}
           INPUT_MAX_CATEGORIES: ${{ github.event.inputs.max_categories || '12' }}
           INPUT_SKIP_AI: ${{ github.event.inputs.skip_ai || 'false' }}
           INPUT_NO_NOTIFY: ${{ github.event.inputs.no_notify || 'false' }}

@@ -224,14 +224,12 @@ class ProductFilter:
     def evaluate_for_catalog(self, product: ProductItem) -> FilterResult:
         """Relaxed catalog gate for saving discounted deals into Supabase `products`.
 
-        Keeps products that match `target_genders`, have a positive price, and carry
-        either at least `min_catalog_discount_percent` (>= 15%) off OR a cart/promo
-        deal — even if the listing page did not return size or fabric metadata.
+        Always keeps all adult genders (`men`, `women`, `unisex`) regardless of
+        `user_settings.target_genders` (which exclusively controls Web Push / strict
+        notification eligibility). Requires a positive price and either at least
+        `min_catalog_discount_percent` (>= 15%) off OR a cart/promo deal.
         """
         reasons: list[str] = []
-
-        if self._target_genders and product.gender.value not in self._target_genders:
-            reasons.append(f"gender_mismatch:{product.gender.value}")
 
         effective_price = product.effective_price
         if effective_price <= Decimal("0"):

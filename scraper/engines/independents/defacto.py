@@ -47,6 +47,7 @@ DEFACTO_CATEGORY_PATHS: dict[str, tuple[str, ...]] = {
         "/indirim/erkek-firsat-fiyatlar",
         "/indirim/kadin-firsat-fiyatlar",
         "/erkek-outlet",
+        "/kadin-outlet",
     ),
     "men": (
         "/indirim/erkek-net-yuzde-50",
@@ -58,6 +59,7 @@ DEFACTO_CATEGORY_PATHS: dict[str, tuple[str, ...]] = {
         "/indirim/kadin-net-yuzde-50",
         "/kadin-indirimli-urunler",
         "/indirim/kadin-firsat-fiyatlar",
+        "/kadin-outlet",
     ),
 }
 
@@ -320,6 +322,11 @@ class DeFactoScraper(BaseScraper):
         """Fetch discounted products across DeFacto sale listing pages."""
         paths = DEFACTO_CATEGORY_PATHS.get(self.section) or DEFACTO_CATEGORY_PATHS["all"]
         selected_paths = list(paths[: self.max_categories])
+        effective_max_pages = (
+            min(self.max_pages_per_category, 8)
+            if self.section == "all" and len(selected_paths) >= 6
+            else self.max_pages_per_category
+        )
 
         products_by_id: dict[str, ProductItem] = {}
         cat_failures = 0
@@ -337,7 +344,7 @@ class DeFactoScraper(BaseScraper):
 
             cat_failed = False
             consecutive_empty_pages = 0
-            for page in range(1, self.max_pages_per_category + 1):
+            for page in range(1, effective_max_pages + 1):
                 if self.is_budget_exceeded():
                     break
                 if page > 1:
