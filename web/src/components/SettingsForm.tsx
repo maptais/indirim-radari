@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import {
   CheckCircle2,
@@ -35,6 +36,7 @@ import type {
 
 interface SettingsFormProps {
   initialSettings: UserSettingsRow | null;
+  initialActivePushCount?: number;
   initialError?: string | null;
 }
 
@@ -178,8 +180,10 @@ function ChipInput({
 
 export function SettingsForm({
   initialSettings,
+  initialActivePushCount,
   initialError = null,
 }: SettingsFormProps) {
+  const router = useRouter();
   const [settings, setSettings] = useState<UserSettingsRow | null>(
     initialSettings
   );
@@ -243,6 +247,7 @@ export function SettingsForm({
       if (data.settings) {
         setSettings(data.settings);
       }
+      router.refresh();
       setStatusMessage({
         type: "success",
         text: data.message || "Ayarlarınız Supabase veritabanına kaydedildi.",
@@ -316,7 +321,10 @@ export function SettingsForm({
         </div>
 
         {/* Web Push Subscription Card */}
-        <PushControl variant="card" />
+        <PushControl
+          variant="card"
+          initialActiveCount={initialActivePushCount}
+        />
 
         {statusMessage && (
           <div

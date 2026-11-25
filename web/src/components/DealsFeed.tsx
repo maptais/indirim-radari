@@ -439,7 +439,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
   const fetchProducts = useCallback(
     async (
       params: FetchParams,
-      options: { page?: number; append?: boolean } = {}
+      options: { page?: number; append?: boolean; bypassCache?: boolean } = {}
     ) => {
       const targetPage = options.page ?? 1;
       const append = Boolean(options.append && targetPage > 1);
@@ -487,6 +487,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
         }
         if (params.sort) sp.set("sort", params.sort);
         if (params.q.trim()) sp.set("q", params.q.trim());
+        if (options.bypassCache) sp.set("refresh", "1");
 
         const res = await fetch(`/api/products?${sp.toString()}`, {
           cache: "no-store",
@@ -578,27 +579,41 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
           setDraftPrefs(parsed);
           setHasLocalPrefs(true);
           hydratedRef.current = true;
-          void fetchProducts(
-            {
-              ...currentParamsRef.current,
-              genders: parsed.genders,
-              topSizes: parsed.topSizes,
-              bottomSizes: parsed.bottomSizes,
-              shoeSizes: parsed.shoeSizes,
-              sort: parsed.sort,
-              minDiscount: parsed.minDiscount,
-              onlyMySize: parsed.onlyMySize,
-              hideUnknownSize: parsed.hideUnknownSize,
-              usePersonalSizes: true,
-            },
-            { page: 1, append: false }
-          );
+          const matchesInitialSsr =
+            !initialError &&
+            gendersEqual(parsed.genders, initialDefaults.targetGenders) &&
+            parsed.sort === "discount" &&
+            parsed.minDiscount === 0 &&
+            !parsed.onlyMySize &&
+            !parsed.hideUnknownSize;
+
+          if (!matchesInitialSsr) {
+            void fetchProducts(
+              {
+                ...currentParamsRef.current,
+                genders: parsed.genders,
+                topSizes: parsed.topSizes,
+                bottomSizes: parsed.bottomSizes,
+                shoeSizes: parsed.shoeSizes,
+                sort: parsed.sort,
+                minDiscount: parsed.minDiscount,
+                onlyMySize: parsed.onlyMySize,
+                hideUnknownSize: parsed.hideUnknownSize,
+                usePersonalSizes: true,
+              },
+              { page: 1, append: false }
+            );
+          }
           return;
         }
       }
 
-      // localStorage is empty: initialize defaults from /api/settings
+      // localStorage is empty: SSR already supplied fresh user_settings defaults;
+      // only fall back to /api/settings if initial SSR returned an error.
       hydratedRef.current = true;
+      if (!initialError) {
+        return;
+      }
       try {
         const res = await fetch("/api/settings", {
           cache: "no-store",
@@ -1017,6 +1032,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
                 void fetchProducts(currentParamsRef.current, {
                   page: 1,
                   append: false,
+                  bypassCache: true,
                 })
               }
               disabled={loading}

@@ -191,7 +191,7 @@ export function SystemStatusView({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/status", { cache: "no-store" });
+      const res = await fetch("/api/status?refresh=1", { cache: "no-store" });
       const payload = await res.json();
       if (!res.ok) {
         throw new Error(payload.error || "Sistem durumu güncellenemedi.");

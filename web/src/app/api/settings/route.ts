@@ -1,21 +1,18 @@
+import { revalidatePath } from "next/cache";
 import { NextRequest, NextResponse } from "next/server";
 
+import { invalidateProductsCache } from "@/lib/products-server";
 import {
-  CATEGORY_ORDER,
-  DEFAULT_CATEGORY_THRESHOLDS,
-  DEFAULT_TARGET_GENDERS,
-  GENDER_ORDER,
-} from "@/lib/constants";
+  USER_SETTINGS_COLUMNS,
+  clampInteger,
+  normalizeSettingsRow,
+  sanitizeStringArray,
+  sanitizeTargetGenders,
+  sanitizeThresholds,
+} from "@/lib/settings-server";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import type {
-  CategoryThresholds,
-  ProductCategory,
-  ProductGender,
-  UserSettingsRow,
-} from "@/types/database";
 
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
 const NO_CACHE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -23,118 +20,12 @@ const NO_CACHE_HEADERS = {
   Expires: "0",
 } as const;
 
-const VALID_GENDERS = new Set<ProductGender>(GENDER_ORDER);
-
-function sanitizeTargetGenders(input: unknown): ProductGender[] {
-  if (!Array.isArray(input)) return [...DEFAULT_TARGET_GENDERS];
-  const seen = new Set<ProductGender>();
-  const result: ProductGender[] = [];
-  for (const raw of input) {
-    if (typeof raw !== "string") continue;
-    const normalized = raw.trim().toLowerCase() as ProductGender;
-    if (VALID_GENDERS.has(normalized) && !seen.has(normalized)) {
-      seen.add(normalized);
-      result.push(normalized);
-    }
-  }
-  return result.length > 0 ? result : [...DEFAULT_TARGET_GENDERS];
-}
-
-function sanitizeStringArray(
-  input: unknown,
-  transform: (value: string) => string
-): string[] {
-  if (!Array.isArray(input)) return [];
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const raw of input) {
-    if (typeof raw !== "string") continue;
-    const cleaned = transform(raw.trim());
-    if (cleaned && !seen.has(cleaned)) {
-      seen.add(cleaned);
-      result.push(cleaned);
-    }
-  }
-  return result;
-}
-
-function clampInteger(
-  input: unknown,
-  min: number,
-  max: number,
-  fallback: number
-): number {
-  const numeric = Number(input);
-  if (!Number.isFinite(numeric)) return fallback;
-  return Math.min(max, Math.max(min, Math.round(numeric)));
-}
-
-function sanitizeThresholds(input: unknown): CategoryThresholds {
-  const source =
-    input && typeof input === "object"
-      ? (input as Record<string, Record<string, unknown>>)
-      : {};
-
-  const result = { ...DEFAULT_CATEGORY_THRESHOLDS };
-
-  for (const category of CATEGORY_ORDER) {
-    const fallback = DEFAULT_CATEGORY_THRESHOLDS[category];
-    const entry = source[category];
-    if (entry && typeof entry === "object") {
-      const maxPriceRaw = Number(entry.max_price_try);
-      result[category as ProductCategory] = {
-        min_discount_percent: clampInteger(
-          entry.min_discount_percent,
-          0,
-          100,
-          fallback.min_discount_percent
-        ),
-        max_price_try:
-          Number.isFinite(maxPriceRaw) && maxPriceRaw >= 0
-            ? Math.round(maxPriceRaw)
-            : fallback.max_price_try,
-      };
-    }
-  }
-
-  return result;
-}
-
-function normalizeSettingsRow(row: Record<string, unknown>): UserSettingsRow {
-  return {
-    id: 1,
-    target_genders: sanitizeTargetGenders(row.target_genders),
-    top_sizes: sanitizeStringArray(row.top_sizes, (v) => v.toUpperCase()),
-    bottom_sizes: sanitizeStringArray(row.bottom_sizes, (v) => v.toUpperCase()),
-    shoe_sizes: sanitizeStringArray(row.shoe_sizes, (v) => v.toUpperCase()),
-    negative_keywords: sanitizeStringArray(row.negative_keywords, (v) =>
-      v.toLocaleLowerCase("tr-TR")
-    ),
-    max_polyester_percent: clampInteger(row.max_polyester_percent, 0, 100, 30),
-    excluded_fabrics: sanitizeStringArray(row.excluded_fabrics, (v) =>
-      v.toLocaleLowerCase("tr-TR")
-    ),
-    category_thresholds: sanitizeThresholds(row.category_thresholds),
-    style_profile: typeof row.style_profile === "string" ? row.style_profile : "",
-    min_ai_notify_score: clampInteger(row.min_ai_notify_score, 1, 10, 7),
-    price_history_lookback_days: clampInteger(
-      row.price_history_lookback_days,
-      7,
-      365,
-      45
-    ),
-    notifications_enabled: Boolean(row.notifications_enabled ?? true),
-    created_at: typeof row.created_at === "string" ? row.created_at : undefined,
-    updated_at: typeof row.updated_at === "string" ? row.updated_at : undefined,
-  };
-}
-
 export async function GET() {
   try {
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from("user_settings")
-      .select("*")
+      .select(USER_SETTINGS_COLUMNS)
       .eq("id", 1)
       .limit(1)
       .maybeSingle();
@@ -158,12 +49,15 @@ export async function GET() {
 
     return NextResponse.json(
       {
-        settings: normalizeSettingsRow(data as Record<string, unknown>),
+        settings: normalizeSettingsRow(
+          data as unknown as Record<string, unknown>
+        ),
       },
       { headers: NO_CACHE_HEADERS }
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Bilinmeyen sunucu hatası";
+    const message =
+      error instanceof Error ? error.message : "Bilinmeyen sunucu hatası";
     return NextResponse.json(
       { error: "Ayarlar yüklenirken bir hata oluştu.", details: message },
       { status: 500, headers: NO_CACHE_HEADERS }
@@ -220,7 +114,7 @@ export async function PUT(request: NextRequest) {
     const { data, error } = await supabase
       .from("user_settings")
       .upsert(payload, { onConflict: "id" })
-      .select("*")
+      .select(USER_SETTINGS_COLUMNS)
       .single();
 
     if (error) {
@@ -230,15 +124,22 @@ export async function PUT(request: NextRequest) {
       );
     }
 
+    invalidateProductsCache();
+    revalidatePath("/settings");
+    revalidatePath("/");
+
     return NextResponse.json(
       {
         message: "Ayarlarınız başarıyla kaydedildi.",
-        settings: normalizeSettingsRow(data as Record<string, unknown>),
+        settings: normalizeSettingsRow(
+          data as unknown as Record<string, unknown>
+        ),
       },
       { headers: NO_CACHE_HEADERS }
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Bilinmeyen sunucu hatası";
+    const message =
+      error instanceof Error ? error.message : "Bilinmeyen sunucu hatası";
     return NextResponse.json(
       { error: "Ayarlar güncellenirken bir hata oluştu.", details: message },
       { status: 500, headers: NO_CACHE_HEADERS }

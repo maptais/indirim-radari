@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { DEFAULT_PAGE_SIZE, queryProductsCatalog } from "@/lib/products-server";
 
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
 const NO_CACHE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -59,6 +58,10 @@ export async function GET(request: NextRequest) {
         ? Number(pageSizeRaw)
         : DEFAULT_PAGE_SIZE;
 
+    const bypassCache =
+      searchParams.get("refresh") === "1" ||
+      searchParams.get("refresh") === "true";
+
     const { data, error } = await queryProductsCatalog({
       brand: searchParams.get("brand") || "all",
       category: searchParams.get("category") || "all",
@@ -75,6 +78,7 @@ export async function GET(request: NextRequest) {
       q: searchParams.get("q") || "",
       page,
       pageSize,
+      bypassCache,
     });
 
     if (error) {

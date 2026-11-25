@@ -2,18 +2,14 @@ import { DealsFeed } from "@/components/DealsFeed";
 import {
   DEFAULT_PAGE_SIZE,
   createEmptyProductsResponse,
-  queryProductsCatalog,
+  loadInitialProductsCatalog,
 } from "@/lib/products-server";
 
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
 async function loadInitialProducts() {
   try {
-    const { data, error } = await queryProductsCatalog({
-      page: 1,
-      pageSize: DEFAULT_PAGE_SIZE,
-    });
+    const { data, error } = await loadInitialProductsCatalog(DEFAULT_PAGE_SIZE);
     if (error) {
       return {
         data,

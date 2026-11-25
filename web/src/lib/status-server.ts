@@ -1,5 +1,7 @@
 import "server-only";
 
+import { revalidateTag, unstable_cache } from "next/cache";
+
 import { BRAND_CATALOG, getBrandLabel } from "@/lib/constants";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import type {
@@ -9,6 +11,12 @@ import type {
   ScrapeStatus,
   StatusApiResponse,
 } from "@/types/database";
+
+const STATUS_CACHE_TAG = "system-status";
+const STATUS_CACHE_TTL_SECONDS = 60;
+
+const SCRAPE_LOG_COLUMNS =
+  "id, brand, engine, run_mode, status, fetched_count, matched_count, saved_count, notified_count, duration_ms, error_message, started_at, finished_at";
 
 const VALID_RUN_MODES = new Set<ScrapeRunMode>(["cloud", "local"]);
 const VALID_STATUSES = new Set<ScrapeStatus>([
@@ -74,106 +82,176 @@ export function buildEmptyStatusResponse(): StatusApiResponse {
   };
 }
 
-export async function loadSystemStatus(): Promise<{
+export function invalidateSystemStatusCache(): void {
+  try {
+    revalidateTag(STATUS_CACHE_TAG);
+  } catch {
+    // Safe no-op if called outside Next.js request lifecycle
+  }
+}
+
+/**
+ * Fetches recent scan history (PK index scan, limit 20) and per-brand latest
+ * health logs (index seek on idx_scrape_logs_brand_started, limit 1 per brand)
+ * in parallel via Promise.all — avoiding a 500-row full-table sort on scrape_logs.
+ */
+async function fetchSystemStatusUncached(): Promise<StatusApiResponse> {
+  const supabase = getSupabaseAdmin();
+
+  const recentLogsQuery = supabase
+    .from("scrape_logs")
+    .select(SCRAPE_LOG_COLUMNS)
+    .order("id", { ascending: false })
+    .limit(20);
+
+  const brandHealthQueries = BRAND_CATALOG.map((meta) =>
+    supabase
+      .from("scrape_logs")
+      .select(SCRAPE_LOG_COLUMNS)
+      .eq("brand", meta.slug)
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+  );
+
+  const [recentLogsRes, ...brandHealthResults] = await Promise.all([
+    recentLogsQuery,
+    ...brandHealthQueries,
+  ]);
+
+  if (recentLogsRes.error) {
+    throw new Error(
+      `Tarama kayıtları okunamadı: ${recentLogsRes.error.message}`
+    );
+  }
+
+  for (const res of brandHealthResults) {
+    if (res.error) {
+      throw new Error(`Marka sağlık durumu okunamadı: ${res.error.message}`);
+    }
+  }
+
+  const recentLogs = (recentLogsRes.data || []).map((row) =>
+    normalizeLogRow(row as Record<string, unknown>)
+  );
+
+  const latestByBrand = new Map<string, ScrapeLogRow>();
+
+  BRAND_CATALOG.forEach((meta, idx) => {
+    const rawRow = brandHealthResults[idx]?.data;
+    if (rawRow) {
+      latestByBrand.set(
+        meta.slug,
+        normalizeLogRow(rawRow as Record<string, unknown>)
+      );
+    }
+  });
+
+  // Also check recentLogs so any brand logged outside BRAND_CATALOG (or a brand
+  // log inserted moments after its per-brand query) is reflected accurately.
+  for (const log of recentLogs) {
+    if (!log.brand) continue;
+    const existing = latestByBrand.get(log.brand);
+    if (!existing || log.started_at > existing.started_at || log.id > existing.id) {
+      latestByBrand.set(log.brand, log);
+    }
+  }
+
+  const knownSlugs = new Set<string>(BRAND_CATALOG.map((b) => b.slug));
+  const brands: BrandStatusItem[] = BRAND_CATALOG.map((meta) => ({
+    brand: meta.slug,
+    label: meta.label,
+    group: meta.group,
+    default_run_mode: meta.defaultRunMode,
+    latest_log: latestByBrand.get(meta.slug) ?? null,
+  }));
+
+  for (const [slug, log] of latestByBrand.entries()) {
+    if (!knownSlugs.has(slug)) {
+      brands.push({
+        brand: slug,
+        label: getBrandLabel(slug),
+        group: "Diğer",
+        default_run_mode: log.run_mode,
+        latest_log: log,
+      });
+    }
+  }
+
+  let successCount = 0;
+  let partialCount = 0;
+  let blockedCount = 0;
+  let failedCount = 0;
+  let runningCount = 0;
+  let neverRunCount = 0;
+  let latestRunAt: string | null =
+    recentLogs[0]?.finished_at || recentLogs[0]?.started_at || null;
+
+  for (const item of brands) {
+    const log = item.latest_log;
+    const status = log?.status;
+    if (!status) {
+      neverRunCount += 1;
+    } else if (status === "success") {
+      successCount += 1;
+    } else if (status === "partial") {
+      partialCount += 1;
+    } else if (status === "blocked") {
+      blockedCount += 1;
+    } else if (status === "failed") {
+      failedCount += 1;
+    } else if (status === "running") {
+      runningCount += 1;
+    }
+
+    const candidateTs = log?.finished_at || log?.started_at || null;
+    if (candidateTs && (!latestRunAt || candidateTs > latestRunAt)) {
+      latestRunAt = candidateTs;
+    }
+  }
+
+  return {
+    brands,
+    recentLogs,
+    summary: {
+      totalBrands: brands.length,
+      successCount,
+      partialCount,
+      blockedCount,
+      failedCount,
+      runningCount,
+      neverRunCount,
+      latestRunAt,
+    },
+  };
+}
+
+const getCachedSystemStatus = unstable_cache(
+  async () => fetchSystemStatusUncached(),
+  ["system-status-v1"],
+  {
+    revalidate: STATUS_CACHE_TTL_SECONDS,
+    tags: [STATUS_CACHE_TAG],
+  }
+);
+
+export async function loadSystemStatus(
+  options: { bypassCache?: boolean } = {}
+): Promise<{
   data: StatusApiResponse;
   error: string | null;
 }> {
   const empty = buildEmptyStatusResponse();
 
   try {
-    const supabase = getSupabaseAdmin();
-    const { data: rawLogs, error } = await supabase
-      .from("scrape_logs")
-      .select(
-        "id, brand, engine, run_mode, status, fetched_count, matched_count, saved_count, notified_count, duration_ms, error_message, started_at, finished_at"
-      )
-      .order("started_at", { ascending: false })
-      .limit(500);
-
-    if (error) {
-      return {
-        data: empty,
-        error: `Tarama kayıtları okunamadı: ${error.message}`,
-      };
+    if (options.bypassCache) {
+      invalidateSystemStatusCache();
+      const fresh = await fetchSystemStatusUncached();
+      return { data: fresh, error: null };
     }
 
-    const logs = (rawLogs || []).map((row) =>
-      normalizeLogRow(row as Record<string, unknown>)
-    );
-
-    const latestByBrand = new Map<string, ScrapeLogRow>();
-    for (const log of logs) {
-      if (log.brand && !latestByBrand.has(log.brand)) {
-        latestByBrand.set(log.brand, log);
-      }
-    }
-
-    const knownSlugs = new Set<string>(BRAND_CATALOG.map((b) => b.slug));
-    const brands: BrandStatusItem[] = BRAND_CATALOG.map((meta) => ({
-      brand: meta.slug,
-      label: meta.label,
-      group: meta.group,
-      default_run_mode: meta.defaultRunMode,
-      latest_log: latestByBrand.get(meta.slug) ?? null,
-    }));
-
-    // Include any extra brand slugs logged in DB outside the canonical 22
-    for (const [slug, log] of latestByBrand.entries()) {
-      if (!knownSlugs.has(slug)) {
-        brands.push({
-          brand: slug,
-          label: getBrandLabel(slug),
-          group: "Diğer",
-          default_run_mode: log.run_mode,
-          latest_log: log,
-        });
-      }
-    }
-
-    let successCount = 0;
-    let partialCount = 0;
-    let blockedCount = 0;
-    let failedCount = 0;
-    let runningCount = 0;
-    let neverRunCount = 0;
-
-    for (const item of brands) {
-      const status = item.latest_log?.status;
-      if (!status) {
-        neverRunCount += 1;
-      } else if (status === "success") {
-        successCount += 1;
-      } else if (status === "partial") {
-        partialCount += 1;
-      } else if (status === "blocked") {
-        blockedCount += 1;
-      } else if (status === "failed") {
-        failedCount += 1;
-      } else if (status === "running") {
-        runningCount += 1;
-      }
-    }
-
-    const firstLog = logs[0] ?? null;
-    const latestRunAt = firstLog?.finished_at || firstLog?.started_at || null;
-
-    return {
-      data: {
-        brands,
-        recentLogs: logs.slice(0, 20),
-        summary: {
-          totalBrands: brands.length,
-          successCount,
-          partialCount,
-          blockedCount,
-          failedCount,
-          runningCount,
-          neverRunCount,
-          latestRunAt,
-        },
-      },
-      error: null,
-    };
+    const cached = await getCachedSystemStatus();
+    return { data: cached, error: null };
   } catch (err) {
     return {
       data: empty,

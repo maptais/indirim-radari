@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
   Bell,
@@ -23,6 +25,7 @@ import {
 
 interface PushControlProps {
   variant?: "compact" | "card";
+  initialActiveCount?: number;
 }
 
 type PushUiState =
@@ -34,15 +37,27 @@ type PushUiState =
   | "unsubscribed"
   | "subscribed";
 
-export function PushControl({ variant = "compact" }: PushControlProps) {
+export function PushControl({
+  variant = "compact",
+  initialActiveCount,
+}: PushControlProps) {
+  const router = useRouter();
   const [state, setState] = useState<PushUiState>("loading");
   const [vapidPublicKey, setVapidPublicKey] = useState<string | null>(null);
-  const [activeCount, setActiveCount] = useState<number>(0);
+  const [activeCount, setActiveCount] = useState<number>(
+    initialActiveCount ?? 0
+  );
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{
     type: "success" | "error" | "info";
     text: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (typeof initialActiveCount === "number") {
+      setActiveCount(initialActiveCount);
+    }
+  }, [initialActiveCount]);
 
   const syncPushState = useCallback(async () => {
     try {
@@ -121,6 +136,7 @@ export function PushControl({ variant = "compact" }: PushControlProps) {
 
       setState("subscribed");
       setActiveCount((prev) => Math.max(1, prev + 1));
+      router.refresh();
       setFeedback({
         type: "success",
         text: "Bildirimler açıldı! Gerçek indirimler anında bu cihaza gelecek.",
@@ -152,6 +168,7 @@ export function PushControl({ variant = "compact" }: PushControlProps) {
       }
       setState("unsubscribed");
       setActiveCount((prev) => Math.max(0, prev - 1));
+      router.refresh();
       setFeedback({
         type: "info",
         text: "Bu cihaz için bildirimler kapatıldı.",
@@ -227,13 +244,13 @@ export function PushControl({ variant = "compact" }: PushControlProps) {
 
     if (state === "ios-install-required") {
       return (
-        <a
+        <Link
           href="/settings#bildirimler"
           className="inline-flex h-9 items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 text-xs font-medium text-amber-300 transition hover:bg-amber-500/20"
         >
           <Smartphone className="h-3.5 w-3.5" />
           <span>Ana Ekrana Ekle</span>
-        </a>
+        </Link>
       );
     }
 
@@ -256,13 +273,13 @@ export function PushControl({ variant = "compact" }: PushControlProps) {
     }
 
     return (
-      <a
+      <Link
         href="/settings#bildirimler"
         className="inline-flex h-9 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-xs font-medium text-zinc-300 transition hover:bg-white/10"
       >
         <BellOff className="h-3.5 w-3.5 text-zinc-400" />
         <span>Bildirim Ayarı</span>
-      </a>
+      </Link>
     );
   }
 

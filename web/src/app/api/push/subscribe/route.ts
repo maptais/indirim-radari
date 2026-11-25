@@ -1,3 +1,4 @@
+import { revalidatePath } from "next/cache";
 import { NextRequest, NextResponse } from "next/server";
 
 import { getSupabaseAdmin } from "@/lib/supabase-server";
@@ -20,33 +21,37 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const endpointParam = (searchParams.get("endpoint") || "").trim();
 
-    const { count, error: countError } = await supabase
-      .from("push_subscriptions")
-      .select("id", { count: "exact", head: true })
-      .eq("is_active", true);
+    const [countRes, matchRes] = await Promise.all([
+      supabase
+        .from("push_subscriptions")
+        .select("id", { count: "exact", head: true })
+        .eq("is_active", true),
+      endpointParam
+        ? supabase
+            .from("push_subscriptions")
+            .select("id")
+            .eq("endpoint", endpointParam)
+            .eq("is_active", true)
+            .maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
 
-    if (countError) {
+    if (countRes.error) {
       return NextResponse.json(
-        { error: "Abonelik durumu kontrol edilemedi.", details: countError.message },
+        {
+          error: "Abonelik durumu kontrol edilemedi.",
+          details: countRes.error.message,
+        },
         { status: 500 }
       );
     }
 
-    let isEndpointSubscribed = false;
-    if (endpointParam) {
-      const { data: match } = await supabase
-        .from("push_subscriptions")
-        .select("id, is_active")
-        .eq("endpoint", endpointParam)
-        .eq("is_active", true)
-        .maybeSingle();
-      isEndpointSubscribed = Boolean(match);
-    }
+    const isEndpointSubscribed = Boolean(matchRes.data);
 
     return NextResponse.json({
       configured,
       vapidPublicKey: configured ? vapidPublicKey : null,
-      activeCount: count ?? 0,
+      activeCount: countRes.count ?? 0,
       isEndpointSubscribed,
     });
   } catch (error) {
@@ -105,6 +110,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    revalidatePath("/settings");
+
     return NextResponse.json(
       {
         message: "Bildirim aboneliğiniz başarıyla aktifleştirildi.",
@@ -154,6 +161,8 @@ export async function DELETE(request: NextRequest) {
         { status: 500 }
       );
     }
+
+    revalidatePath("/settings");
 
     return NextResponse.json({
       message: "Bu cihaz için bildirim aboneliği kapatıldı.",

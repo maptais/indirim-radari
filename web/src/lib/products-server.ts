@@ -1,3 +1,6 @@
+import "server-only";
+
+import { revalidateTag, unstable_cache } from "next/cache";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
@@ -20,6 +23,38 @@ const MAX_PAGE_SIZE = 120;
 const SUPABASE_CHUNK_SIZE = 1000;
 const MAX_SUPABASE_PAGES = 20; // Safety ceiling: 20,000 active products
 
+const PRODUCTS_INITIAL_CACHE_TAG = "products-initial";
+const PRODUCTS_CACHE_TTL_SECONDS = 90;
+const PRODUCTS_MEMORY_CACHE_TTL_MS = PRODUCTS_CACHE_TTL_SECONDS * 1000;
+
+// Only columns rendered in ProductCard or used by DealsFeed filters (drops 10 unused columns)
+const PRODUCT_LIST_COLUMNS = [
+  "id",
+  "brand",
+  "title",
+  "category",
+  "gender",
+  "url",
+  "image_url",
+  "current_price",
+  "original_price",
+  "cart_price",
+  "promo_badge",
+  "discount_percent",
+  "available_sizes",
+  "is_critical_stock",
+  "fabric_info",
+  "is_real_discount",
+  "lowest_price_days",
+  "ai_score",
+  "ai_comment",
+  "last_seen_at",
+].join(",");
+
+// Ultra-slim scalar columns for initial SSR counters & per-brand counts (no title/url/image/sizes/comments)
+const PRODUCT_COUNTER_COLUMNS =
+  "brand,is_real_discount,is_critical_stock,current_price,cart_price,promo_badge";
+
 const VALID_CATEGORIES = new Set<ProductCategory>([
   "shoes",
   "tops",
@@ -29,6 +64,16 @@ const VALID_CATEGORIES = new Set<ProductCategory>([
 ]);
 
 const VALID_GENDERS = new Set<ProductGender>(GENDER_ORDER);
+
+interface CatalogSnapshot {
+  products: ProductRow[];
+  defaultPrefs: DefaultUserPrefs;
+  latestScrapedAt: string | null;
+  fetchedAt: number;
+}
+
+let catalogSnapshotCache: CatalogSnapshot | null = null;
+let catalogSnapshotInFlight: Promise<CatalogSnapshot> | null = null;
 
 export interface ProductQueryOptions {
   brand?: string;
@@ -46,6 +91,17 @@ export interface ProductQueryOptions {
   q?: string;
   page?: number;
   pageSize?: number;
+  bypassCache?: boolean;
+}
+
+export function invalidateProductsCache(): void {
+  catalogSnapshotCache = null;
+  catalogSnapshotInFlight = null;
+  try {
+    revalidateTag(PRODUCTS_INITIAL_CACHE_TAG);
+  } catch {
+    // Safe no-op outside Next.js request lifecycle
+  }
 }
 
 export function createEmptyProductsResponse(
@@ -145,6 +201,25 @@ function normalizeSizeArray(raw: unknown): string[] {
   return out;
 }
 
+function parseValidCartPrice(
+  rawCartValue: unknown,
+  currentPrice: number
+): number | null {
+  const rawCart =
+    rawCartValue !== null && rawCartValue !== undefined
+      ? Number(rawCartValue)
+      : null;
+  if (
+    rawCart !== null &&
+    Number.isFinite(rawCart) &&
+    rawCart > 0 &&
+    rawCart < currentPrice
+  ) {
+    return rawCart;
+  }
+  return null;
+}
+
 export function getEffectivePrice(item: ProductRow): number {
   if (
     item.cart_price !== null &&
@@ -173,27 +248,38 @@ export function getEffectiveDiscountPercent(item: ProductRow): number {
   return item.discount_percent;
 }
 
+function compareByDefaultDiscount(a: ProductRow, b: ProductRow): number {
+  const discDiff =
+    getEffectiveDiscountPercent(b) - getEffectiveDiscountPercent(a);
+  if (discDiff !== 0) {
+    return discDiff;
+  }
+  if (Number(b.is_real_discount) !== Number(a.is_real_discount)) {
+    return Number(b.is_real_discount) - Number(a.is_real_discount);
+  }
+  return getEffectivePrice(a) - getEffectivePrice(b);
+}
+
 function normalizeNumericProduct(row: Record<string, unknown>): ProductRow {
   const currentPrice = Number(row.current_price ?? 0);
-  const rawCart =
-    row.cart_price !== null && row.cart_price !== undefined
-      ? Number(row.cart_price)
-      : null;
-  const cartPrice =
-    rawCart !== null &&
-    Number.isFinite(rawCart) &&
-    rawCart > 0 &&
-    rawCart < currentPrice
-      ? rawCart
-      : null;
+  const cartPrice = parseValidCartPrice(row.cart_price, currentPrice);
   const promoBadge =
     typeof row.promo_badge === "string" && row.promo_badge.trim()
       ? row.promo_badge.trim()
       : null;
+  const lastSeenAt = String(row.last_seen_at ?? "");
 
   return {
-    ...(row as unknown as ProductRow),
+    id: String(row.id ?? ""),
+    brand: String(row.brand ?? ""),
+    external_id: String(row.external_id ?? ""),
+    title: String(row.title ?? ""),
+    category: (VALID_CATEGORIES.has(row.category as ProductCategory)
+      ? row.category
+      : "other") as ProductCategory,
     gender: normalizeGender(row.gender),
+    url: String(row.url ?? ""),
+    image_url: typeof row.image_url === "string" ? row.image_url : null,
     current_price: currentPrice,
     original_price:
       row.original_price !== null && row.original_price !== undefined
@@ -202,13 +288,17 @@ function normalizeNumericProduct(row: Record<string, unknown>): ProductRow {
     cart_price: cartPrice,
     promo_badge: promoBadge,
     discount_percent: Number(row.discount_percent ?? 0),
+    currency: typeof row.currency === "string" ? row.currency : "TRY",
     available_sizes: Array.isArray(row.available_sizes)
       ? (row.available_sizes as string[])
       : [],
+    is_critical_stock: Boolean(row.is_critical_stock),
+    fabric_info: typeof row.fabric_info === "string" ? row.fabric_info : null,
     polyester_percent:
       row.polyester_percent !== null && row.polyester_percent !== undefined
         ? Number(row.polyester_percent)
         : null,
+    is_real_discount: Boolean(row.is_real_discount),
     lowest_price_days:
       row.lowest_price_days !== null && row.lowest_price_days !== undefined
         ? Number(row.lowest_price_days)
@@ -222,10 +312,20 @@ function normalizeNumericProduct(row: Record<string, unknown>): ProductRow {
       row.ai_score !== null && row.ai_score !== undefined
         ? Number(row.ai_score)
         : null,
+    ai_comment: typeof row.ai_comment === "string" ? row.ai_comment : null,
+    notified_at: typeof row.notified_at === "string" ? row.notified_at : null,
     last_notified_price:
       row.last_notified_price !== null && row.last_notified_price !== undefined
         ? Number(row.last_notified_price)
         : null,
+    is_active: row.is_active !== false,
+    first_seen_at:
+      typeof row.first_seen_at === "string" ? row.first_seen_at : lastSeenAt,
+    last_seen_at: lastSeenAt,
+    created_at:
+      typeof row.created_at === "string" ? row.created_at : lastSeenAt,
+    updated_at:
+      typeof row.updated_at === "string" ? row.updated_at : lastSeenAt,
   };
 }
 
@@ -264,7 +364,9 @@ function resolveAllowedGenders(
   const parsed = trimmed
     .split(",")
     .map((part) => canonicalizeGenderToken(part))
-    .filter((part): part is ProductGender => part !== null && VALID_GENDERS.has(part));
+    .filter(
+      (part): part is ProductGender => part !== null && VALID_GENDERS.has(part)
+    );
 
   if (parsed.length === 0) {
     return new Set<ProductGender>(fallbackGenders);
@@ -272,9 +374,373 @@ function resolveAllowedGenders(
   return new Set<ProductGender>(parsed);
 }
 
+function buildGenderCacheKey(
+  rawGenders: ProductQueryOptions["genders"]
+): string {
+  if (rawGenders === undefined || rawGenders === null) return "settings";
+  if (Array.isArray(rawGenders)) {
+    const valid = GENDER_ORDER.filter((g) => rawGenders.includes(g));
+    return valid.length > 0 ? valid.join(",") : "settings";
+  }
+  const trimmed = String(rawGenders).trim().toLowerCase();
+  if (!trimmed || trimmed === "settings") return "settings";
+  if (trimmed === "all") return "all";
+  const parsedSet = new Set(
+    trimmed
+      .split(",")
+      .map((part) => canonicalizeGenderToken(part))
+      .filter(
+        (part): part is ProductGender =>
+          part !== null && VALID_GENDERS.has(part)
+      )
+  );
+  const canonical = GENDER_ORDER.filter((g) => parsedSet.has(g));
+  return canonical.length > 0 ? canonical.join(",") : "settings";
+}
+
+async function fetchPrefsAndLatestScrape(supabase: SupabaseClient): Promise<{
+  defaultPrefs: DefaultUserPrefs;
+  latestLogTimestamp: string | null;
+}> {
+  const [{ data: latestLogs }, { data: userSettingsRow }] = await Promise.all([
+    supabase
+      .from("scrape_logs")
+      .select("finished_at, started_at")
+      .order("id", { ascending: false })
+      .limit(1),
+    supabase
+      .from("user_settings")
+      .select("target_genders, top_sizes, bottom_sizes, shoe_sizes")
+      .eq("id", 1)
+      .limit(1)
+      .maybeSingle(),
+  ]);
+
+  const defaultPrefs: DefaultUserPrefs = {
+    targetGenders: normalizeTargetGenders(userSettingsRow?.target_genders),
+    topSizes: normalizeSizeArray(userSettingsRow?.top_sizes),
+    bottomSizes: normalizeSizeArray(userSettingsRow?.bottom_sizes),
+    shoeSizes: normalizeSizeArray(userSettingsRow?.shoe_sizes),
+  };
+
+  const latestLogEntry = latestLogs && latestLogs[0];
+  const latestLogTimestamp =
+    (latestLogEntry?.finished_at as string | null) ||
+    (latestLogEntry?.started_at as string | null) ||
+    null;
+
+  return { defaultPrefs, latestLogTimestamp };
+}
+
 /**
- * Fetch ALL active products from Supabase without hitting PostgREST's 1000-row cap.
- * First page requests `count: "exact"`; remaining pages are fetched in parallel via `.range()`.
+ * Fetch ONLY 6 tiny scalar columns across active products matching the gender scope
+ * to compute exact initial-view counters and per-brand counts without downloading
+ * titles, URLs, images, fabric_info, ai_comment, or available_sizes arrays.
+ */
+async function fetchCounterRows(
+  supabase: SupabaseClient,
+  allowedGenders: ProductGender[] | null
+): Promise<Record<string, unknown>[]> {
+  let firstQuery = supabase
+    .from("products")
+    .select(PRODUCT_COUNTER_COLUMNS, { count: "exact" })
+    .eq("is_active", true);
+
+  if (allowedGenders) {
+    firstQuery = firstQuery.in("gender", allowedGenders);
+  }
+
+  const first = await firstQuery
+    .order("discount_percent", { ascending: false })
+    .order("id", { ascending: true })
+    .range(0, SUPABASE_CHUNK_SIZE - 1);
+
+  if (first.error) {
+    throw new Error(first.error.message);
+  }
+
+  const firstRows = (first.data || []) as unknown as Record<string, unknown>[];
+  const exactTotal =
+    typeof first.count === "number" && Number.isFinite(first.count)
+      ? first.count
+      : null;
+
+  if (
+    firstRows.length === 0 ||
+    (exactTotal !== null && exactTotal <= firstRows.length) ||
+    (exactTotal === null && firstRows.length < SUPABASE_CHUNK_SIZE)
+  ) {
+    return firstRows;
+  }
+
+  const allRows: Record<string, unknown>[] = [...firstRows];
+  const step = firstRows.length;
+
+  if (exactTotal !== null) {
+    const totalPages = Math.min(
+      MAX_SUPABASE_PAGES,
+      Math.ceil(exactTotal / step)
+    );
+    const remainingQueries = [];
+    for (let pageIdx = 1; pageIdx < totalPages; pageIdx += 1) {
+      const from = pageIdx * step;
+      const to = from + step - 1;
+      let q = supabase
+        .from("products")
+        .select(PRODUCT_COUNTER_COLUMNS)
+        .eq("is_active", true);
+      if (allowedGenders) {
+        q = q.in("gender", allowedGenders);
+      }
+      remainingQueries.push(
+        q
+          .order("discount_percent", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to)
+      );
+    }
+
+    const results = await Promise.all(remainingQueries);
+    for (const res of results) {
+      if (res.error) {
+        throw new Error(res.error.message);
+      }
+      if (Array.isArray(res.data) && res.data.length > 0) {
+        allRows.push(...(res.data as unknown as Record<string, unknown>[]));
+      }
+    }
+  } else {
+    for (let pageIdx = 1; pageIdx < MAX_SUPABASE_PAGES; pageIdx += 1) {
+      const from = pageIdx * step;
+      const to = from + step - 1;
+      let q = supabase
+        .from("products")
+        .select(PRODUCT_COUNTER_COLUMNS)
+        .eq("is_active", true);
+      if (allowedGenders) {
+        q = q.in("gender", allowedGenders);
+      }
+      const res = await q
+        .order("discount_percent", { ascending: false })
+        .order("id", { ascending: true })
+        .range(from, to);
+
+      if (res.error) {
+        throw new Error(res.error.message);
+      }
+      const chunk = (res.data || []) as unknown as Record<string, unknown>[];
+      allRows.push(...chunk);
+      if (chunk.length < step) break;
+    }
+  }
+
+  return allRows;
+}
+
+/**
+ * Lightweight initial view query for SSR `/` and default unfiltered page-1 requests:
+ * Fetches ONLY the top candidate products (minimal display columns) + slim 6-column
+ * counters + exact head-count for unknown sizes in parallel via Promise.all.
+ */
+async function fetchInitialProductsViewUncached(
+  pageSize: number,
+  genderCacheKey: string
+): Promise<ProductsApiResponse> {
+  const supabase = getSupabaseAdmin();
+  const { defaultPrefs, latestLogTimestamp } =
+    await fetchPrefsAndLatestScrape(supabase);
+
+  const allowedGenderSet = resolveAllowedGenders(
+    genderCacheKey,
+    defaultPrefs.targetGenders
+  );
+  const allowedGenders = allowedGenderSet
+    ? Array.from(allowedGenderSet)
+    : null;
+
+  const candidateLimit = Math.max(pageSize * 2, 120);
+
+  let topProductsQuery = supabase
+    .from("products")
+    .select(PRODUCT_LIST_COLUMNS)
+    .eq("is_active", true);
+  if (allowedGenders) {
+    topProductsQuery = topProductsQuery.in("gender", allowedGenders);
+  }
+  topProductsQuery = topProductsQuery
+    .order("discount_percent", { ascending: false })
+    .order("is_real_discount", { ascending: false })
+    .order("current_price", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(candidateLimit);
+
+  let cartProductsQuery = supabase
+    .from("products")
+    .select(PRODUCT_LIST_COLUMNS)
+    .eq("is_active", true)
+    .not("cart_price", "is", null);
+  if (allowedGenders) {
+    cartProductsQuery = cartProductsQuery.in("gender", allowedGenders);
+  }
+  cartProductsQuery = cartProductsQuery
+    .order("discount_percent", { ascending: false })
+    .order("current_price", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(candidateLimit);
+
+  let unknownSizeQuery = supabase
+    .from("products")
+    .select("id", { count: "exact", head: true })
+    .eq("is_active", true)
+    .eq("available_sizes", "{}");
+  if (allowedGenders) {
+    unknownSizeQuery = unknownSizeQuery.in("gender", allowedGenders);
+  }
+
+  const [topRes, cartRes, counterRows, unknownSizeRes] = await Promise.all([
+    topProductsQuery,
+    cartProductsQuery,
+    fetchCounterRows(supabase, allowedGenders),
+    unknownSizeQuery,
+  ]);
+
+  if (topRes.error) {
+    throw new Error(topRes.error.message);
+  }
+  if (cartRes.error) {
+    throw new Error(cartRes.error.message);
+  }
+
+  // Merge and deduplicate top discount items + cart-discounted items for exact sort
+  const candidateMap = new Map<string, ProductRow>();
+  let latestProductSeen: string | null = null;
+
+  for (const rawRow of [
+    ...((topRes.data || []) as unknown as Record<string, unknown>[]),
+    ...((cartRes.data || []) as unknown as Record<string, unknown>[]),
+  ]) {
+    const normalized = normalizeNumericProduct(rawRow);
+    if (
+      normalized.last_seen_at &&
+      (!latestProductSeen || normalized.last_seen_at > latestProductSeen)
+    ) {
+      latestProductSeen = normalized.last_seen_at;
+    }
+    if (normalized.id && !candidateMap.has(normalized.id)) {
+      candidateMap.set(normalized.id, normalized);
+    }
+  }
+
+  const sortedCandidates = Array.from(candidateMap.values()).sort(
+    compareByDefaultDiscount
+  );
+  const pagedProducts = sortedCandidates.slice(0, pageSize);
+
+  const brandCounts: Record<string, number> = {};
+  const brandsSet = new Set<string>();
+  let realDiscountCount = 0;
+  let criticalStockCount = 0;
+  let cartPromoCount = 0;
+
+  for (const row of counterRows) {
+    const brand = typeof row.brand === "string" ? row.brand : "";
+    if (brand) {
+      brandsSet.add(brand);
+      brandCounts[brand] = (brandCounts[brand] || 0) + 1;
+    }
+    if (row.is_real_discount) realDiscountCount += 1;
+    if (row.is_critical_stock) criticalStockCount += 1;
+
+    const currentPrice = Number(row.current_price ?? 0);
+    const validCartPrice = parseValidCartPrice(row.cart_price, currentPrice);
+    const hasPromoBadge =
+      typeof row.promo_badge === "string" && row.promo_badge.trim().length > 0;
+    if (validCartPrice !== null || hasPromoBadge) {
+      cartPromoCount += 1;
+    }
+  }
+
+  const totalCount = counterRows.length;
+  const unknownSizeCount = unknownSizeRes.error
+    ? 0
+    : (unknownSizeRes.count ?? 0);
+  const latestScrapedAt = latestLogTimestamp || latestProductSeen;
+
+  return {
+    products: pagedProducts,
+    brands: Array.from(brandsSet).sort(),
+    brandCounts,
+    targetGenders: defaultPrefs.targetGenders,
+    defaultPrefs,
+    page: 1,
+    pageSize,
+    hasMore: pageSize < totalCount,
+    totalCount,
+    realDiscountCount,
+    criticalStockCount,
+    stats: {
+      totalActive: totalCount,
+      totalCatalog: totalCount,
+      realDiscountCount,
+      criticalStockCount,
+      cartPromoCount,
+      unknownSizeCount,
+      latestScrapedAt,
+    },
+  };
+}
+
+const getCachedInitialProductsView = unstable_cache(
+  async (pageSize: number, genderCacheKey: string) =>
+    fetchInitialProductsViewUncached(pageSize, genderCacheKey),
+  ["products-initial-ssr-v1"],
+  {
+    revalidate: PRODUCTS_CACHE_TTL_SECONDS,
+    tags: [PRODUCTS_INITIAL_CACHE_TAG, "products", "user-settings"],
+  }
+);
+
+export async function loadInitialProductsCatalog(
+  pageSize = DEFAULT_PAGE_SIZE,
+  options: {
+    genders?: ProductQueryOptions["genders"];
+    bypassCache?: boolean;
+  } = {}
+): Promise<{ data: ProductsApiResponse; error: string | null }> {
+  const safePageSize = clampInteger(
+    pageSize,
+    1,
+    MAX_PAGE_SIZE,
+    DEFAULT_PAGE_SIZE
+  );
+  const genderKey = buildGenderCacheKey(options.genders);
+
+  try {
+    if (options.bypassCache) {
+      invalidateProductsCache();
+      const fresh = await fetchInitialProductsViewUncached(
+        safePageSize,
+        genderKey
+      );
+      return { data: fresh, error: null };
+    }
+
+    const cached = await getCachedInitialProductsView(safePageSize, genderKey);
+    return { data: cached, error: null };
+  } catch (err) {
+    return {
+      data: createEmptyProductsResponse(safePageSize),
+      error:
+        err instanceof Error
+          ? err.message
+          : "Ürünler veritabanından alınamadı.",
+    };
+  }
+}
+
+/**
+ * Fetch ALL active products (only display/filter columns, never SELECT *)
+ * without hitting PostgREST's 1000-row cap.
  */
 async function fetchAllActiveProducts(
   supabase: SupabaseClient
@@ -284,7 +750,7 @@ async function fetchAllActiveProducts(
 }> {
   const first = await supabase
     .from("products")
-    .select("*", { count: "exact" })
+    .select(PRODUCT_LIST_COLUMNS, { count: "exact" })
     .eq("is_active", true)
     .order("discount_percent", { ascending: false })
     .order("last_seen_at", { ascending: false })
@@ -295,7 +761,7 @@ async function fetchAllActiveProducts(
     return { rows: [], error: first.error };
   }
 
-  const firstRows = (first.data || []) as Record<string, unknown>[];
+  const firstRows = (first.data || []) as unknown as Record<string, unknown>[];
   const exactTotal =
     typeof first.count === "number" && Number.isFinite(first.count)
       ? first.count
@@ -324,7 +790,7 @@ async function fetchAllActiveProducts(
       remainingQueries.push(
         supabase
           .from("products")
-          .select("*")
+          .select(PRODUCT_LIST_COLUMNS)
           .eq("is_active", true)
           .order("discount_percent", { ascending: false })
           .order("last_seen_at", { ascending: false })
@@ -339,7 +805,7 @@ async function fetchAllActiveProducts(
         return { rows: [], error: res.error };
       }
       if (Array.isArray(res.data) && res.data.length > 0) {
-        allRows.push(...(res.data as Record<string, unknown>[]));
+        allRows.push(...(res.data as unknown as Record<string, unknown>[]));
       }
     }
   } else {
@@ -348,7 +814,7 @@ async function fetchAllActiveProducts(
       const to = from + step - 1;
       const res = await supabase
         .from("products")
-        .select("*")
+        .select(PRODUCT_LIST_COLUMNS)
         .eq("is_active", true)
         .order("discount_percent", { ascending: false })
         .order("last_seen_at", { ascending: false })
@@ -358,7 +824,7 @@ async function fetchAllActiveProducts(
       if (res.error) {
         return { rows: [], error: res.error };
       }
-      const chunk = (res.data || []) as Record<string, unknown>[];
+      const chunk = (res.data || []) as unknown as Record<string, unknown>[];
       allRows.push(...chunk);
       if (chunk.length < step) break;
     }
@@ -376,6 +842,70 @@ async function fetchAllActiveProducts(
   }
 
   return { rows: deduped, error: null };
+}
+
+async function getActiveCatalogSnapshot(
+  bypassCache: boolean
+): Promise<CatalogSnapshot> {
+  const now = Date.now();
+
+  if (bypassCache) {
+    invalidateProductsCache();
+  } else if (
+    catalogSnapshotCache &&
+    now - catalogSnapshotCache.fetchedAt < PRODUCTS_MEMORY_CACHE_TTL_MS
+  ) {
+    return catalogSnapshotCache;
+  }
+
+  if (!bypassCache && catalogSnapshotInFlight) {
+    return catalogSnapshotInFlight;
+  }
+
+  const loadPromise = (async (): Promise<CatalogSnapshot> => {
+    const supabase = getSupabaseAdmin();
+    const [productsResult, meta] = await Promise.all([
+      fetchAllActiveProducts(supabase),
+      fetchPrefsAndLatestScrape(supabase),
+    ]);
+
+    if (productsResult.error) {
+      throw new Error(productsResult.error.message);
+    }
+
+    const normalized = productsResult.rows.map(normalizeNumericProduct);
+    let latestProductSeen: string | null = null;
+    for (const item of normalized) {
+      if (
+        item.last_seen_at &&
+        (!latestProductSeen || item.last_seen_at > latestProductSeen)
+      ) {
+        latestProductSeen = item.last_seen_at;
+      }
+    }
+
+    const snapshot: CatalogSnapshot = {
+      products: normalized,
+      defaultPrefs: meta.defaultPrefs,
+      latestScrapedAt: meta.latestLogTimestamp || latestProductSeen,
+      fetchedAt: Date.now(),
+    };
+
+    catalogSnapshotCache = snapshot;
+    return snapshot;
+  })();
+
+  if (!bypassCache) {
+    catalogSnapshotInFlight = loadPromise;
+  }
+
+  try {
+    return await loadPromise;
+  } finally {
+    if (catalogSnapshotInFlight === loadPromise) {
+      catalogSnapshotInFlight = null;
+    }
+  }
 }
 
 export async function queryProductsCatalog(
@@ -398,38 +928,43 @@ export async function queryProductsCatalog(
   const onlyMySize = Boolean(options.onlyMySize);
   const hideUnknownSize = Boolean(options.hideUnknownSize);
   const minDiscount = clampInteger(options.minDiscount, 0, 100, 0);
+  const bypassCache = Boolean(options.bypassCache);
 
-  const supabase = getSupabaseAdmin();
+  const isSimpleFirstPageView =
+    page === 1 &&
+    (!brandParam || brandParam === "all") &&
+    (!categoryParam || categoryParam === "all") &&
+    !realOnly &&
+    !cartOnly &&
+    !onlyMySize &&
+    !hideUnknownSize &&
+    minDiscount === 0 &&
+    sortParam === "discount" &&
+    !queryText;
 
-  const [productsResult, { data: latestLogs }, { data: userSettingsRow }] =
-    await Promise.all([
-      fetchAllActiveProducts(supabase),
-      supabase
-        .from("scrape_logs")
-        .select("finished_at, started_at")
-        .order("started_at", { ascending: false })
-        .limit(1),
-      supabase
-        .from("user_settings")
-        .select("target_genders, top_sizes, bottom_sizes, shoe_sizes")
-        .eq("id", 1)
-        .limit(1)
-        .maybeSingle(),
-    ]);
+  // Fast path: initial SSR or unfiltered page-1 requests (including manual refresh)
+  // avoid loading the entire active catalog into memory.
+  if (isSimpleFirstPageView) {
+    return loadInitialProductsCatalog(pageSize, {
+      genders: options.genders,
+      bypassCache,
+    });
+  }
 
-  if (productsResult.error) {
+  let snapshot: CatalogSnapshot;
+  try {
+    snapshot = await getActiveCatalogSnapshot(bypassCache);
+  } catch (err) {
     return {
       data: createEmptyProductsResponse(pageSize),
-      error: productsResult.error.message,
+      error:
+        err instanceof Error
+          ? err.message
+          : "Ürünler veritabanından alınamadı.",
     };
   }
 
-  const defaultPrefs: DefaultUserPrefs = {
-    targetGenders: normalizeTargetGenders(userSettingsRow?.target_genders),
-    topSizes: normalizeSizeArray(userSettingsRow?.top_sizes),
-    bottomSizes: normalizeSizeArray(userSettingsRow?.bottom_sizes),
-    shoeSizes: normalizeSizeArray(userSettingsRow?.shoe_sizes),
-  };
+  const { defaultPrefs, products: allActive, latestScrapedAt } = snapshot;
 
   const effectiveSizes = {
     topSizes:
@@ -451,17 +986,8 @@ export async function queryProductsCatalog(
     defaultPrefs.targetGenders
   );
 
-  const allActive = productsResult.rows.map(normalizeNumericProduct);
-
-  let latestProductSeen: string | null = null;
   const genderScoped: ProductRow[] = [];
   for (const item of allActive) {
-    if (
-      item.last_seen_at &&
-      (!latestProductSeen || item.last_seen_at > latestProductSeen)
-    ) {
-      latestProductSeen = item.last_seen_at;
-    }
     if (!allowedGenders || allowedGenders.has(item.gender)) {
       genderScoped.push(item);
     }
@@ -526,7 +1052,10 @@ export async function queryProductsCatalog(
           return false;
         }
       } else {
-        const targets = getTargetSizesForCategory(item.category, effectiveSizes);
+        const targets = getTargetSizesForCategory(
+          item.category,
+          effectiveSizes
+        );
         if (
           targets.length > 0 &&
           !matchesUserSizes(item.available_sizes, targets, item.category)
@@ -621,17 +1150,8 @@ export async function queryProductsCatalog(
         return getEffectiveDiscountPercent(b) - getEffectiveDiscountPercent(a);
       }
       case "discount":
-      default: {
-        const discDiff =
-          getEffectiveDiscountPercent(b) - getEffectiveDiscountPercent(a);
-        if (discDiff !== 0) {
-          return discDiff;
-        }
-        if (Number(b.is_real_discount) !== Number(a.is_real_discount)) {
-          return Number(b.is_real_discount) - Number(a.is_real_discount);
-        }
-        return getEffectivePrice(a) - getEffectivePrice(b);
-      }
+      default:
+        return compareByDefaultDiscount(a, b);
     }
   });
 
@@ -640,12 +1160,6 @@ export async function queryProductsCatalog(
   const end = start + pageSize;
   const pagedProducts = filtered.slice(start, end);
   const hasMore = end < totalCount;
-
-  const latestLogEntry = latestLogs && latestLogs[0];
-  const latestScrapedAt =
-    (latestLogEntry?.finished_at as string | null) ||
-    (latestLogEntry?.started_at as string | null) ||
-    latestProductSeen;
 
   return {
     data: {
