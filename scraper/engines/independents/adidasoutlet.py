@@ -8,6 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urljoin
 
 from ..base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     BaseScraper,
     ProductCategory,
     ProductGender,
@@ -57,18 +58,20 @@ class AdidasOutletScraper(BaseScraper):
         max_categories: int = 3,
         max_pages_per_category: int = 8,
         page_size: int = 48,
-        max_detail_fetches: int = 48,
+        max_detail_fetches: int = 28,
         fetch_availability: bool = True,
         max_retries: int = 1,
         impersonate: str | None = None,
         timeout_seconds: int = 15,
-        min_jitter_seconds: float = 0.8,
-        max_jitter_seconds: float = 2.0,
+        min_jitter_seconds: float = 0.4,
+        max_jitter_seconds: float = 1.0,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         super().__init__(
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )
         self.section = section
         self.only_discounted = only_discounted
@@ -256,12 +259,16 @@ class AdidasOutletScraper(BaseScraper):
         query_failures = 0
 
         for q_idx, query_slug in enumerate(selected_queries):
+            if self.is_budget_exceeded(reserve_seconds=25.0):
+                break
             if q_idx > 0:
                 self.sleep_jitter()
 
             q_failed = False
             consecutive_empty_pages = 0
             for page_idx in range(self.max_pages_per_category):
+                if self.is_budget_exceeded(reserve_seconds=25.0):
+                    break
                 if page_idx > 0:
                     self.sleep_jitter()
 
@@ -319,14 +326,24 @@ class AdidasOutletScraper(BaseScraper):
 
         products: list[ProductItem] = []
         detail_count = 0
+        detail_timeout = min(self.timeout_seconds, 10)
         for raw_item, query_slug in candidates:
             avail_payload: dict[str, Any] | None = None
             pid = str(raw_item.get("productId") or "").strip()
-            if self.fetch_availability and pid and detail_count < self.max_detail_fetches:
+            if (
+                self.fetch_availability
+                and pid
+                and detail_count < self.max_detail_fetches
+                and not self.is_budget_exceeded()
+            ):
                 if detail_count > 0:
-                    self.sleep_jitter()
+                    self.sleep_jitter(scale=0.6)
                 try:
-                    avail_payload = self.http.get_json(f"{self.base_url}/api/products/{pid}/availability")
+                    avail_payload = self.http.get_json(
+                        f"{self.base_url}/api/products/{pid}/availability",
+                        timeout_seconds=detail_timeout,
+                        max_retries=1,
+                    )
                     detail_count += 1
                 except ScraperBlockedError:
                     raise

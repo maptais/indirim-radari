@@ -8,6 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urljoin
 
 from ..base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     BaseScraper,
     ProductCategory,
     ProductGender,
@@ -74,14 +75,16 @@ class HMScraper(BaseScraper):
         page_size: int = 72,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.4,
-        max_jitter_seconds: float = 1.0,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.15,
+        max_jitter_seconds: float = 0.45,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         super().__init__(
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )
         self.section = section
         self.only_discounted = only_discounted
@@ -309,12 +312,21 @@ class HMScraper(BaseScraper):
         failures = 0
 
         for spec_idx, (page_id, category_id, filters_param) in enumerate(selected_specs):
+            if self.is_budget_exceeded():
+                logger.warning(
+                    "[%s] Soft time budget reached (%d products kept); stopping.",
+                    self.brand,
+                    len(products_by_id),
+                )
+                break
             if spec_idx > 0:
                 self.sleep_jitter()
 
             spec_failed = False
             consecutive_empty_pages = 0
             for page in range(1, self.max_pages_per_category + 1):
+                if self.is_budget_exceeded():
+                    break
                 if page > 1:
                     self.sleep_jitter()
 

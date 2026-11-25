@@ -8,6 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urljoin
 
 from ..base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     BaseScraper,
     ProductCategory,
     ProductGender,
@@ -48,14 +49,16 @@ class InStreetScraper(BaseScraper):
         max_pages: int = 15,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.6,
-        max_jitter_seconds: float = 1.5,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.15,
+        max_jitter_seconds: float = 0.45,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         super().__init__(
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )
         self.section = section
         self.only_discounted = only_discounted
@@ -283,6 +286,14 @@ class InStreetScraper(BaseScraper):
         page_failures = 0
         consecutive_empty_pages = 0
         for page in range(1, pages_to_scan + 1):
+            if self.is_budget_exceeded():
+                logger.warning(
+                    "[%s] Soft time budget reached at page %d (%d products kept).",
+                    self.brand,
+                    page,
+                    len(products_by_id),
+                )
+                break
             if page > 1:
                 self.sleep_jitter()
 

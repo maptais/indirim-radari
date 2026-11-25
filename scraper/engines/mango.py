@@ -11,6 +11,7 @@ from typing import Any, Literal
 from urllib.parse import quote, urljoin
 
 from .base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     BaseScraper,
     ProductCategory,
     ProductGender,
@@ -161,13 +162,14 @@ class MangoScraper(BaseScraper):
         section: Literal["all", "men", "women"] = "all",
         only_discounted: bool = True,
         max_categories: int = 8,
-        max_detail_fetches: int = 36,
+        max_detail_fetches: int = 24,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.5,
-        max_jitter_seconds: float = 1.2,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.25,
+        max_jitter_seconds: float = 0.6,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         brand_key = brand.strip().lower()
         if brand_key not in MANGO_BRAND_CONFIGS:
@@ -182,6 +184,7 @@ class MangoScraper(BaseScraper):
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )
 
         self.section = section
@@ -599,6 +602,13 @@ class MangoScraper(BaseScraper):
         cat_failures = 0
 
         for idx, path in enumerate(selected_paths):
+            if self.is_budget_exceeded(reserve_seconds=20.0):
+                logger.warning(
+                    "[%s] Soft time budget reached during Mango categories (%d candidates kept).",
+                    self.brand,
+                    len(candidates),
+                )
+                break
             if idx > 0:
                 self.sleep_jitter()
 
@@ -646,20 +656,26 @@ class MangoScraper(BaseScraper):
         detail_fetches = 0
         pdp_blocked = False
 
+        detail_timeout = min(self.timeout_seconds, 10)
         for entry, path, _ in candidates:
             detail_html: str | None = None
             if (
                 self.fetch_variant_details
                 and not pdp_blocked
                 and detail_fetches < self.max_detail_fetches
+                and not self.is_budget_exceeded()
             ):
                 if detail_fetches > 0:
-                    self.sleep_jitter()
+                    self.sleep_jitter(scale=0.6)
                 rel_url = str((entry.get("product") or {}).get("url") or "").strip()
                 if rel_url:
                     pdp_url = urljoin(f"{self.base_url}/", quote(rel_url.lstrip("/"), safe="/:?=&%"))
                     try:
-                        detail_html = self.http.get_text(pdp_url)
+                        detail_html = self.http.get_text(
+                            pdp_url,
+                            timeout_seconds=detail_timeout,
+                            max_retries=1,
+                        )
                         detail_fetches += 1
                     except ScraperBlockedError as exc:
                         logger.warning(

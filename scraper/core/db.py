@@ -50,6 +50,85 @@ class DatabaseClient:
     # ------------------------------------------------------------------
     # products
     # ------------------------------------------------------------------
+    def get_products_by_external_ids(
+        self,
+        brand: str,
+        external_ids: list[str],
+        *,
+        chunk_size: int = 150,
+    ) -> dict[str, dict[str, Any]]:
+        """Batch-fetch existing products for a brand keyed by `external_id`."""
+        brand_slug = brand.strip().lower()
+        unique_ids = list(dict.fromkeys(eid.strip() for eid in external_ids if eid and eid.strip()))
+        if not brand_slug or not unique_ids:
+            return {}
+
+        step = max(1, min(200, chunk_size))
+        found: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(unique_ids), step):
+            chunk = unique_ids[offset : offset + step]
+            response = (
+                self._client.table("products")
+                .select("*")
+                .eq("brand", brand_slug)
+                .in_("external_id", chunk)
+                .execute()
+            )
+            for row in response.data or []:
+                ext_id = str(row.get("external_id") or "").strip()
+                if ext_id:
+                    found[ext_id] = row
+        return found
+
+    def upsert_products_batch(
+        self,
+        payloads: list[dict[str, Any]],
+        *,
+        chunk_size: int = 150,
+    ) -> list[dict[str, Any]]:
+        """Batch upsert serialized `products` payloads in 100-200 row chunks.
+
+        Payloads are grouped by key-set before sending so optional columns such as
+        `ai_score`/`ai_comment` are never padded with `NULL` by PostgREST when absent.
+        """
+        if not payloads:
+            return []
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Deduplicate on (brand, external_id) keeping latest payload so ON CONFLICT never collides
+        deduped: dict[tuple[str, str], dict[str, Any]] = {}
+        for raw in payloads:
+            row = dict(raw)
+            row.setdefault("last_seen_at", now_iso)
+            key = (
+                str(row.get("brand") or "").strip().lower(),
+                str(row.get("external_id") or "").strip(),
+            )
+            if not key[0] or not key[1]:
+                continue
+            deduped[key] = row
+
+        if not deduped:
+            return []
+
+        # Partition by identical column sets to avoid NULL-overwriting omitted AI fields
+        buckets: dict[frozenset[str], list[dict[str, Any]]] = {}
+        for row in deduped.values():
+            buckets.setdefault(frozenset(row.keys()), []).append(row)
+
+        step = max(1, min(200, chunk_size))
+        saved_rows: list[dict[str, Any]] = []
+        for rows_group in buckets.values():
+            for offset in range(0, len(rows_group), step):
+                chunk = rows_group[offset : offset + step]
+                response = (
+                    self._client.table("products")
+                    .upsert(chunk, on_conflict="brand,external_id")
+                    .execute()
+                )
+                saved_rows.extend(response.data or [])
+        return saved_rows
+
     def get_product_by_external_id(self, brand: str, external_id: str) -> dict[str, Any] | None:
         """Look up an existing product by `(brand, external_id)`."""
         response = (
@@ -139,6 +218,66 @@ class DatabaseClient:
     # ------------------------------------------------------------------
     # price_history
     # ------------------------------------------------------------------
+    def record_price_history_batch(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        chunk_size: int = 150,
+    ) -> int:
+        """Batch insert `price_history` rows in 100-200 row chunks."""
+        if not records:
+            return 0
+
+        step = max(1, min(200, chunk_size))
+        inserted = 0
+        for offset in range(0, len(records), step):
+            chunk = records[offset : offset + step]
+            response = self._client.table("price_history").insert(chunk).execute()
+            rows = response.data or []
+            inserted += len(rows) if rows else len(chunk)
+        return inserted
+
+    def get_price_history_bulk(
+        self,
+        product_ids: list[str],
+        *,
+        days: int = 60,
+        chunk_size: int = 50,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Batch-fetch `price_history` snapshots grouped by `product_id`."""
+        unique_ids = list(dict.fromkeys(pid.strip() for pid in product_ids if pid and pid.strip()))
+        if not unique_ids:
+            return {}
+
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        step = max(1, min(150, chunk_size))
+        page_size = 1000
+        grouped: dict[str, list[dict[str, Any]]] = {}
+
+        for offset in range(0, len(unique_ids), step):
+            chunk = unique_ids[offset : offset + step]
+            range_start = 0
+            while True:
+                response = (
+                    self._client.table("price_history")
+                    .select("id, product_id, price, original_price, discount_percent, recorded_at")
+                    .in_("product_id", chunk)
+                    .gte("recorded_at", since)
+                    .order("recorded_at", desc=True)
+                    .range(range_start, range_start + page_size - 1)
+                    .execute()
+                )
+                rows = response.data or []
+                for row in rows:
+                    pid = str(row.get("product_id") or "").strip()
+                    if pid:
+                        grouped.setdefault(pid, []).append(row)
+                if len(rows) < page_size:
+                    break
+                range_start += page_size
+
+        return grouped
+
     def record_price_history(
         self,
         product_id: str,

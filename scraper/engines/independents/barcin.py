@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from ..base import ProductCategory
+from ..base import DEFAULT_BRAND_TIME_BUDGET_SECONDS, ProductCategory
 from ..eren import AkinonBrandConfig, AkinonScraper
 
 BARCIN_CONFIG = AkinonBrandConfig(
@@ -33,13 +33,14 @@ class BarcinScraper(AkinonScraper):
         only_discounted: bool = True,
         max_categories: int = 3,
         max_pages_per_category: int = 10,
-        max_detail_fetches: int = 40,
+        max_detail_fetches: int = 24,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.3,
-        max_jitter_seconds: float = 0.8,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.15,
+        max_jitter_seconds: float = 0.45,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         super().__init__(
             BARCIN_CONFIG,
@@ -54,4 +55,5 @@ class BarcinScraper(AkinonScraper):
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )

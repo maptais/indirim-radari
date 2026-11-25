@@ -10,6 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urljoin
 
 from ..base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     BaseScraper,
     ProductCategory,
     ProductGender,
@@ -76,14 +77,16 @@ class SneaksUpScraper(BaseScraper):
         max_pages_per_category: int = 12,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.6,
-        max_jitter_seconds: float = 1.6,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.15,
+        max_jitter_seconds: float = 0.45,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         super().__init__(
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )
         self.section = section
         self.only_discounted = only_discounted
@@ -319,12 +322,21 @@ class SneaksUpScraper(BaseScraper):
         failures = 0
 
         for idx, path in enumerate(selected_paths):
+            if self.is_budget_exceeded():
+                logger.warning(
+                    "[%s] Soft time budget reached (%d products kept); stopping.",
+                    self.brand,
+                    len(products_by_id),
+                )
+                break
             if idx > 0:
                 self.sleep_jitter()
 
             cat_failed = False
             consecutive_empty_pages = 0
             for page_idx in range(1, self.max_pages_per_category + 1):
+                if self.is_budget_exceeded():
+                    break
                 if page_idx > 1:
                     self.sleep_jitter()
 

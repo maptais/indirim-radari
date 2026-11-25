@@ -215,6 +215,9 @@ class ScrapeResult(BaseModel):
     error_message: str | None = Field(default=None)
 
 
+DEFAULT_BRAND_TIME_BUDGET_SECONDS = 210.0
+
+
 class BaseScraper(ABC):
     """Abstract base class implemented by all brand and group scraper engines."""
 
@@ -228,6 +231,7 @@ class BaseScraper(ABC):
         timeout_seconds: int = 20,
         min_jitter_seconds: float = 1.0,
         max_jitter_seconds: float = 3.0,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         if not self.brand:
             raise ValueError(f"{self.__class__.__name__} must define a non-empty `brand` attribute.")
@@ -239,17 +243,53 @@ class BaseScraper(ABC):
         self.timeout_seconds = timeout_seconds
         self.min_jitter_seconds = min_jitter_seconds
         self.max_jitter_seconds = max_jitter_seconds
+        self.max_duration_seconds: float | None = (
+            float(max_duration_seconds)
+            if max_duration_seconds is not None and max_duration_seconds > 0
+            else None
+        )
+        self._budget_deadline: float | None = None
+        self.budget_exceeded: bool = False
+
+    def start_budget(self) -> None:
+        """Start (or reset) the soft per-brand wall-clock deadline timer."""
+        self.budget_exceeded = False
+        if self.max_duration_seconds is not None:
+            self._budget_deadline = time.monotonic() + self.max_duration_seconds
+        else:
+            self._budget_deadline = None
+
+    def remaining_budget_seconds(self) -> float | None:
+        """Return remaining seconds in the soft brand time budget, or None if unbounded."""
+        if self._budget_deadline is None:
+            return None
+        return max(0.0, self._budget_deadline - time.monotonic())
+
+    def is_budget_exceeded(self, reserve_seconds: float = 0.0) -> bool:
+        """Return True once the soft per-brand time budget has elapsed (with optional reserve)."""
+        if self._budget_deadline is None:
+            return False
+        if time.monotonic() >= (self._budget_deadline - max(0.0, reserve_seconds)):
+            self.budget_exceeded = True
+            return True
+        return False
 
     @abstractmethod
     def fetch_products(self) -> list[ProductItem]:
         """Fetch and normalize currently discounted products for this brand."""
 
-    def sleep_jitter(self) -> None:
+    def sleep_jitter(self, *, scale: float = 1.0) -> None:
         """Pause briefly with uniform random jitter to stay polite against rate limits."""
-        if self.max_jitter_seconds <= 0:
+        if self.max_jitter_seconds <= 0 or scale <= 0:
             return
-        delay = random.uniform(self.min_jitter_seconds, self.max_jitter_seconds)
-        time.sleep(delay)
+        if self.is_budget_exceeded():
+            return
+        delay = random.uniform(self.min_jitter_seconds, self.max_jitter_seconds) * scale
+        remaining = self.remaining_budget_seconds()
+        if remaining is not None:
+            delay = min(delay, remaining)
+        if delay > 0:
+            time.sleep(delay)
 
     def close(self) -> None:
         """Release any underlying HTTP sessions or resources (override in subclasses)."""
@@ -263,9 +303,16 @@ class BaseScraper(ABC):
     def run(self) -> ScrapeResult:
         """Execute `fetch_products` safely so a single brand failure never aborts the run."""
         started = time.perf_counter()
+        self.start_budget()
         try:
             products = self.fetch_products()
             duration_ms = int((time.perf_counter() - started) * 1000)
+            note = (
+                f"Soft time budget reached ({int(self.max_duration_seconds or 0)}s); "
+                f"preserved {len(products)} collected product(s)."
+                if self.budget_exceeded
+                else None
+            )
             return ScrapeResult(
                 brand=self.brand,
                 engine=self.engine_name,
@@ -273,6 +320,7 @@ class BaseScraper(ABC):
                 products=products,
                 fetched_count=len(products),
                 duration_ms=duration_ms,
+                error_message=note,
             )
         except ScraperBlockedError as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)

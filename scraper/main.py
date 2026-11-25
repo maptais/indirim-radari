@@ -14,13 +14,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scraper.core.ai_scorer import AIStyleScorer
+from scraper.core.ai_scorer import AIStyleScorer, is_new_or_price_dropped
 from scraper.core.config import VALID_TARGET_GENDERS, AppSettings, UserSettings, get_settings
 from scraper.core.db import DatabaseClient
 from scraper.core.filters import FilterBatchSummary, FilterResult, ProductFilter
 from scraper.core.notifier import PushNotifier
 from scraper.core.price_analyzer import PriceAnalysis, PriceAnalyzer
-from scraper.engines.base import BaseScraper, ProductItem, ScrapeRunMode, ScrapeStatus
+from scraper.engines.base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
+    BaseScraper,
+    ProductItem,
+    ScrapeRunMode,
+    ScrapeStatus,
+)
 from scraper.engines.eren import EREN_BRAND_CONFIGS, ErenScraper
 from scraper.engines.independents import (
     AdidasOutletScraper,
@@ -39,6 +45,9 @@ from scraper.engines.mango import MANGO_BRAND_CONFIGS, MangoScraper
 from scraper.engines.trendyol import TRENDYOL_BRAND_CONFIGS, TrendyolScraper
 
 logger = logging.getLogger("indirim_radari")
+
+DEFAULT_MAX_AI_SCORES_PER_BRAND = 15
+DEFAULT_DB_BATCH_SIZE = 150
 
 INDEPENDENT_SHOE_SCRAPERS: dict[str, type[BaseScraper]] = {
     "instreet": InStreetScraper,
@@ -231,10 +240,12 @@ def _build_scraper(
     include_regular: bool,
     only_discounted: bool,
     app_settings: AppSettings | None,
+    brand_timeout_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
 ) -> BaseScraper:
-    timeout = app_settings.request_timeout_seconds if app_settings else 20
-    min_jitter = app_settings.min_jitter_seconds if app_settings else 1.0
-    max_jitter = app_settings.max_jitter_seconds if app_settings else 3.0
+    raw_timeout = app_settings.request_timeout_seconds if app_settings else 15
+    timeout = min(raw_timeout, 15)
+    min_jitter = app_settings.min_jitter_seconds if app_settings else 0.2
+    max_jitter = app_settings.max_jitter_seconds if app_settings else 0.5
 
     if brand in INDITEX_BRAND_CONFIGS:
         return InditexScraper(
@@ -244,8 +255,9 @@ def _build_scraper(
             include_regular_categories=include_regular,
             max_categories=max_categories,
             timeout_seconds=timeout,
-            min_jitter_seconds=min(min_jitter, 0.5),
-            max_jitter_seconds=min(max_jitter, 1.2),
+            min_jitter_seconds=min(min_jitter, 0.25),
+            max_jitter_seconds=min(max_jitter, 0.6),
+            max_duration_seconds=brand_timeout_seconds,
         )
 
     if brand in EREN_BRAND_CONFIGS:
@@ -255,8 +267,9 @@ def _build_scraper(
             only_discounted=only_discounted,
             max_categories=max_categories,
             timeout_seconds=timeout,
-            min_jitter_seconds=min(min_jitter, 0.4),
-            max_jitter_seconds=min(max_jitter, 0.9),
+            min_jitter_seconds=min(min_jitter, 0.15),
+            max_jitter_seconds=min(max_jitter, 0.45),
+            max_duration_seconds=brand_timeout_seconds,
         )
 
     if brand in MANGO_BRAND_CONFIGS:
@@ -266,8 +279,9 @@ def _build_scraper(
             only_discounted=only_discounted,
             max_categories=max_categories,
             timeout_seconds=timeout,
-            min_jitter_seconds=min(min_jitter, 0.5),
-            max_jitter_seconds=min(max_jitter, 1.1),
+            min_jitter_seconds=min(min_jitter, 0.25),
+            max_jitter_seconds=min(max_jitter, 0.6),
+            max_duration_seconds=brand_timeout_seconds,
         )
 
     if brand in TRENDYOL_BRAND_CONFIGS:
@@ -277,8 +291,9 @@ def _build_scraper(
             only_discounted=only_discounted,
             max_categories=max_categories,
             timeout_seconds=timeout,
-            min_jitter_seconds=min(min_jitter, 0.4),
-            max_jitter_seconds=min(max_jitter, 0.9),
+            min_jitter_seconds=min(min_jitter, 0.2),
+            max_jitter_seconds=min(max_jitter, 0.5),
+            max_duration_seconds=brand_timeout_seconds,
         )
 
     if brand in INDEPENDENT_SCRAPERS:
@@ -288,8 +303,9 @@ def _build_scraper(
             only_discounted=only_discounted,
             max_categories=max_categories,
             timeout_seconds=timeout,
-            min_jitter_seconds=min(min_jitter, 0.4),
-            max_jitter_seconds=min(max_jitter, 0.9),
+            min_jitter_seconds=min(min_jitter, 0.15),
+            max_jitter_seconds=min(max_jitter, 0.45),
+            max_duration_seconds=brand_timeout_seconds,
         )
 
     raise ValueError(f"Unsupported brand '{brand}'")
@@ -506,6 +522,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
     had_failure = False
     total_ai_scored = 0
     succeeded_brands: list[str] = []
+    brand_timeout_seconds: float | None = getattr(
+        args, "brand_timeout", DEFAULT_BRAND_TIME_BUDGET_SECONDS
+    )
+    max_ai_per_brand: int = max(
+        0,
+        int(getattr(args, "max_ai_scores_per_brand", DEFAULT_MAX_AI_SCORES_PER_BRAND)),
+    )
 
     for brand in brands:
         started = time.perf_counter()
@@ -519,6 +542,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 include_regular=args.include_regular,
                 only_discounted=not args.include_full_price,
                 app_settings=app_settings,
+                brand_timeout_seconds=brand_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001
             had_failure = True
@@ -588,137 +612,363 @@ def run_pipeline(args: argparse.Namespace) -> int:
         final_status = scrape_result.status
         pipeline_error: str | None = scrape_result.error_message
 
+        # ------------------------------------------------------------------
+        # Stage 1: Batch-fetch existing products & price history from Supabase
+        # ------------------------------------------------------------------
+        existing_by_ext: dict[str, dict[str, object] | None] = {}
+        history_by_pid: dict[str, list[dict[str, object]]] | None = None
+        if db is not None and passed_items:
+            try:
+                if hasattr(db, "get_products_by_external_ids"):
+                    existing_by_ext = db.get_products_by_external_ids(
+                        brand,
+                        [p.external_id for p, _ in passed_items],
+                        chunk_size=DEFAULT_DB_BATCH_SIZE,
+                    )
+                else:
+                    for product, _ in passed_items:
+                        existing_by_ext[product.external_id] = db.get_product_by_external_id(
+                            product.brand,
+                            product.external_id,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] Batch existing-product lookup failed: %s", brand, exc)
+                existing_by_ext = {}
+
+            existing_ids = [
+                str(row["id"])
+                for row in existing_by_ext.values()
+                if isinstance(row, dict) and row.get("id")
+            ]
+            if existing_ids and hasattr(db, "get_price_history_bulk"):
+                try:
+                    history_by_pid = db.get_price_history_bulk(
+                        existing_ids,
+                        days=user_settings.price_history_lookback_days,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[%s] Bulk price_history lookup failed: %s", brand, exc)
+                    history_by_pid = None
+
+        # ------------------------------------------------------------------
+        # Stage 2: In-memory strict evaluation, price analysis & AI candidate selection
+        # ------------------------------------------------------------------
+        prepared_records: list[dict[str, object]] = []
+        ai_candidate_indices: list[int] = []
+
         for product, catalog_res in passed_items:
             try:
                 strict_res = product_filter.evaluate(product)
                 if strict_res.passed:
                     strict_matched_count += 1
 
-                existing_row = (
-                    db.get_product_by_external_id(product.brand, product.external_id)
-                    if db is not None
+                existing_row = existing_by_ext.get(product.external_id)
+                existing_id = (
+                    str(existing_row["id"])
+                    if isinstance(existing_row, dict) and existing_row.get("id")
                     else None
                 )
-                existing_id = str(existing_row["id"]) if existing_row else None
-                analysis, existing_id = price_analyzer.analyze_product(
-                    product,
-                    existing_product_id=existing_id,
-                )
 
-                new_ai_score: int | None = None
-                new_ai_comment: str | None = None
+                if db is None:
+                    analysis = price_analyzer.analyze_from_history(product, [])
+                elif history_by_pid is not None:
+                    history_rows = history_by_pid.get(existing_id, []) if existing_id else []
+                    analysis = price_analyzer.analyze_from_history(product, history_rows)
+                else:
+                    analysis, existing_id = price_analyzer.analyze_product(
+                        product,
+                        existing_product_id=existing_id,
+                    )
+
                 effective_ai_score: int | None = (
-                    existing_row.get("ai_score") if existing_row else None
+                    existing_row.get("ai_score") if isinstance(existing_row, dict) else None
                 )
                 effective_ai_comment: str | None = (
-                    existing_row.get("ai_comment") if existing_row else None
+                    existing_row.get("ai_comment") if isinstance(existing_row, dict) else None
                 )
 
-                # Reserve Gemini AI scoring quota for strict-matching real discounts
+                rec_idx = len(prepared_records)
+                prepared_records.append(
+                    {
+                        "product": product,
+                        "catalog_res": catalog_res,
+                        "strict_res": strict_res,
+                        "existing_row": existing_row,
+                        "analysis": analysis,
+                        "new_ai_score": None,
+                        "new_ai_comment": None,
+                        "effective_ai_score": effective_ai_score,
+                        "effective_ai_comment": effective_ai_comment,
+                    }
+                )
+
+                # Eligible for Gemini AI scoring ONLY if:
+                # 1) passes strict user filter (sizes, fabric, budget, high discount)
+                # 2) has no existing AI score in DB
+                # 3) is newly discovered OR its effective price dropped below DB price
+                # 4) passes `should_score_product` (real discount)
                 if ai_scorer is not None and strict_res.passed:
-                    should_score, score_reason = AIStyleScorer.should_score_product(
-                        analysis,
-                        existing_product=existing_row,
+                    is_fresh_or_dropped = is_new_or_price_dropped(
+                        product,
+                        existing_row if isinstance(existing_row, dict) else None,
                     )
-                    if should_score:
-                        if (
-                            args.max_ai_scores is not None
-                            and total_ai_scored >= args.max_ai_scores
-                        ):
+                    if is_fresh_or_dropped:
+                        should_score, score_reason = ai_scorer.should_score_product(
+                            analysis,
+                            existing_product=existing_row if isinstance(existing_row, dict) else None,
+                        )
+                        if should_score:
+                            ai_candidate_indices.append(rec_idx)
+                        else:
                             logger.debug(
-                                "[%s] Skipping AI score for %s (max_ai_scores=%d reached)",
+                                "[%s] Skipping AI score for %s (%s)",
                                 brand,
                                 product.external_id,
-                                args.max_ai_scores,
+                                score_reason,
                             )
-                        else:
-                            score_res = ai_scorer.score_product(
-                                product,
-                                style_profile=user_settings.style_profile,
-                            )
-                            if score_res.ai_score is not None:
-                                new_ai_score = score_res.ai_score
-                                new_ai_comment = score_res.ai_comment
-                                effective_ai_score = new_ai_score
-                                effective_ai_comment = new_ai_comment
-                                ai_scored_count += 1
-                                total_ai_scored += 1
-                            elif score_res.status in {"rate_limited", "error"}:
-                                logger.warning(
-                                    "[%s] AI scoring fallback for %s (%s): %s",
-                                    brand,
-                                    product.external_id,
-                                    score_res.status,
-                                    score_res.error_message,
-                                )
                     else:
                         logger.debug(
-                            "[%s] Skipping AI score for %s (%s)",
+                            "[%s] Skipping AI score for %s (existing_unchanged_price)",
                             brand,
                             product.external_id,
-                            score_reason,
                         )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] Failed preparing product %s: %s", brand, product.external_id, exc)
+                final_status = ScrapeStatus.PARTIAL
+                pipeline_error = f"Partial processing error: {exc}"
 
-                matched_entries.append(
-                    (product, catalog_res, analysis, effective_ai_score, effective_ai_comment)
+        # ------------------------------------------------------------------
+        # Stage 3: Score ONLY top-N (default 15/brand) highest-discount strict candidates
+        # ------------------------------------------------------------------
+        if ai_scorer is not None and ai_candidate_indices and max_ai_per_brand > 0:
+            ai_candidate_indices.sort(
+                key=lambda idx: (
+                    -(prepared_records[idx]["product"].discount_percent or 0),  # type: ignore[union-attr]
+                    prepared_records[idx]["product"].effective_price,  # type: ignore[union-attr]
+                )
+            )
+            capped_indices = ai_candidate_indices[:max_ai_per_brand]
+            if len(ai_candidate_indices) > len(capped_indices):
+                logger.info(
+                    "[%s] Capping Gemini AI scoring to top %d of %d eligible strict-match product(s).",
+                    brand,
+                    len(capped_indices),
+                    len(ai_candidate_indices),
                 )
 
-                if not args.dry_run and db is not None:
-                    saved_row = db.upsert_product(
-                        product,
-                        is_real_discount=analysis.is_real_discount,
-                        lowest_price_days=analysis.lowest_price_days,
-                        historical_min_price=analysis.historical_min_price,
-                        ai_score=new_ai_score,
-                        ai_comment=new_ai_comment,
+            consecutive_rate_limits = 0
+            for idx in capped_indices:
+                if args.max_ai_scores is not None and total_ai_scored >= args.max_ai_scores:
+                    logger.debug(
+                        "[%s] Stopping AI scoring (global max_ai_scores=%d reached)",
+                        brand,
+                        args.max_ai_scores,
                     )
-                    if analysis.should_record_history:
-                        db.record_price_history(
-                            product_id=str(saved_row["id"]),
-                            price=product.effective_price,
-                            original_price=product.original_price,
-                            discount_percent=product.discount_percent,
-                        )
-                    saved_count += 1
+                    break
 
+                rec = prepared_records[idx]
+                product = rec["product"]  # type: ignore[assignment]
+                score_res = ai_scorer.score_product(
+                    product,  # type: ignore[arg-type]
+                    style_profile=user_settings.style_profile,
+                )
+                if score_res.ai_score is not None:
+                    rec["new_ai_score"] = score_res.ai_score
+                    rec["new_ai_comment"] = score_res.ai_comment
+                    rec["effective_ai_score"] = score_res.ai_score
+                    rec["effective_ai_comment"] = score_res.ai_comment
+                    ai_scored_count += 1
+                    total_ai_scored += 1
+                    consecutive_rate_limits = 0
+                elif score_res.status == "rate_limited":
+                    consecutive_rate_limits += 1
+                    logger.warning(
+                        "[%s] AI scoring rate-limited for %s (%d/2): %s",
+                        brand,
+                        product.external_id,  # type: ignore[union-attr]
+                        consecutive_rate_limits,
+                        score_res.error_message,
+                    )
+                    if consecutive_rate_limits >= 2:
+                        logger.warning(
+                            "[%s] Aborting remaining AI scores for brand due to consecutive 429 rate limits.",
+                            brand,
+                        )
+                        break
+                elif score_res.status == "error":
+                    logger.warning(
+                        "[%s] AI scoring fallback for %s (%s): %s",
+                        brand,
+                        product.external_id,  # type: ignore[union-attr]
+                        score_res.status,
+                        score_res.error_message,
+                    )
+
+        for rec in prepared_records:
+            matched_entries.append(
+                (
+                    rec["product"],  # type: ignore[arg-type]
+                    rec["catalog_res"],  # type: ignore[arg-type]
+                    rec["analysis"],  # type: ignore[arg-type]
+                    rec["effective_ai_score"],  # type: ignore[arg-type]
+                    rec["effective_ai_comment"],  # type: ignore[arg-type]
+                )
+            )
+
+        # ------------------------------------------------------------------
+        # Stage 4: Batch upsert `products` and batch insert `price_history`
+        # ------------------------------------------------------------------
+        saved_by_ext: dict[str, dict[str, object]] = {}
+        if not args.dry_run and db is not None and prepared_records:
+            if hasattr(db, "upsert_products_batch"):
+                try:
+                    product_payloads = [
+                        rec["product"].to_db_payload(  # type: ignore[union-attr]
+                            is_real_discount=rec["analysis"].is_real_discount,  # type: ignore[union-attr]
+                            lowest_price_days=rec["analysis"].lowest_price_days,  # type: ignore[union-attr]
+                            historical_min_price=rec["analysis"].historical_min_price,  # type: ignore[union-attr]
+                            ai_score=rec["new_ai_score"],  # type: ignore[arg-type]
+                            ai_comment=rec["new_ai_comment"],  # type: ignore[arg-type]
+                        )
+                        for rec in prepared_records
+                    ]
+                    saved_rows = db.upsert_products_batch(
+                        product_payloads,
+                        chunk_size=DEFAULT_DB_BATCH_SIZE,
+                    )
+                    for row in saved_rows:
+                        ext_id = str(row.get("external_id") or "").strip()
+                        if ext_id:
+                            saved_by_ext[ext_id] = row
+                    saved_count = len(saved_rows)
+
+                    history_records: list[dict[str, object]] = []
+                    for rec in prepared_records:
+                        analysis = rec["analysis"]  # type: ignore[assignment]
+                        if not analysis.should_record_history:  # type: ignore[union-attr]
+                            continue
+                        product = rec["product"]  # type: ignore[assignment]
+                        saved_row = saved_by_ext.get(product.external_id)  # type: ignore[union-attr]
+                        if saved_row and saved_row.get("id"):
+                            history_records.append(
+                                {
+                                    "product_id": str(saved_row["id"]),
+                                    "price": float(product.effective_price),  # type: ignore[union-attr]
+                                    "original_price": (
+                                        float(product.original_price)  # type: ignore[union-attr]
+                                        if product.original_price is not None  # type: ignore[union-attr]
+                                        else None
+                                    ),
+                                    "discount_percent": product.discount_percent,  # type: ignore[union-attr]
+                                }
+                            )
+
+                    if history_records:
+                        if hasattr(db, "record_price_history_batch"):
+                            db.record_price_history_batch(
+                                history_records,
+                                chunk_size=DEFAULT_DB_BATCH_SIZE,
+                            )
+                        else:
+                            for h_rec in history_records:
+                                db.record_price_history(
+                                    product_id=str(h_rec["product_id"]),
+                                    price=h_rec["price"],  # type: ignore[arg-type]
+                                    original_price=h_rec["original_price"],  # type: ignore[arg-type]
+                                    discount_percent=h_rec["discount_percent"],  # type: ignore[arg-type]
+                                )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[%s] Batch DB write failed: %s", brand, exc)
+                    final_status = ScrapeStatus.PARTIAL
+                    pipeline_error = f"Batch save error: {exc}"
+            else:
+                for rec in prepared_records:
+                    product = rec["product"]  # type: ignore[assignment]
+                    analysis = rec["analysis"]  # type: ignore[assignment]
+                    try:
+                        saved_row = db.upsert_product(
+                            product,  # type: ignore[arg-type]
+                            is_real_discount=analysis.is_real_discount,  # type: ignore[union-attr]
+                            lowest_price_days=analysis.lowest_price_days,  # type: ignore[union-attr]
+                            historical_min_price=analysis.historical_min_price,  # type: ignore[union-attr]
+                            ai_score=rec["new_ai_score"],  # type: ignore[arg-type]
+                            ai_comment=rec["new_ai_comment"],  # type: ignore[arg-type]
+                        )
+                        saved_by_ext[product.external_id] = saved_row  # type: ignore[union-attr]
+                        if analysis.should_record_history:  # type: ignore[union-attr]
+                            db.record_price_history(
+                                product_id=str(saved_row["id"]),
+                                price=product.effective_price,  # type: ignore[union-attr]
+                                original_price=product.original_price,  # type: ignore[union-attr]
+                                discount_percent=product.discount_percent,  # type: ignore[union-attr]
+                            )
+                        saved_count += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[%s] Failed saving product %s: %s",
+                            brand,
+                            product.external_id,  # type: ignore[union-attr]
+                            exc,
+                        )
+                        final_status = ScrapeStatus.PARTIAL
+                        pipeline_error = f"Partial save error: {exc}"
+
+        # ------------------------------------------------------------------
+        # Stage 5: Strictly gated Web Push notifications
+        # ------------------------------------------------------------------
+        if not args.dry_run and db is not None and notifier is not None:
+            for rec in prepared_records:
+                strict_res = rec["strict_res"]  # type: ignore[assignment]
+                if not strict_res.passed:  # type: ignore[union-attr]
+                    continue
+                product = rec["product"]  # type: ignore[assignment]
+                saved_row = saved_by_ext.get(product.external_id)  # type: ignore[union-attr]
+                if not saved_row or not saved_row.get("id"):
+                    continue
+                try:
                     persisted_ai_score = (
                         saved_row.get("ai_score")
                         if saved_row.get("ai_score") is not None
-                        else effective_ai_score
+                        else rec["effective_ai_score"]
+                    )
+                    should_send, notify_reason = notifier.should_notify_product(
+                        product,  # type: ignore[arg-type]
+                        analysis=rec["analysis"],  # type: ignore[arg-type]
+                        user_settings=user_settings,
+                        existing_product=rec["existing_row"],  # type: ignore[arg-type]
+                        ai_score=persisted_ai_score,  # type: ignore[arg-type]
+                    )
+                    if should_send:
+                        push_report = notifier.notify_product(
+                            product,  # type: ignore[arg-type]
+                            product_id=str(saved_row["id"]),
+                            matched_sizes=strict_res.matched_sizes,  # type: ignore[union-attr]
+                            lowest_price_days=rec["analysis"].lowest_price_days,  # type: ignore[union-attr]
+                            ai_score=persisted_ai_score,  # type: ignore[arg-type]
+                        )
+                        if push_report.sent > 0:
+                            notified_count += 1
+                    else:
+                        logger.debug(
+                            "[%s] Skipping push for %s (%s)",
+                            brand,
+                            product.external_id,  # type: ignore[union-attr]
+                            notify_reason,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[%s] Notification step failed for %s: %s",
+                        brand,
+                        product.external_id,  # type: ignore[union-attr]
+                        exc,
                     )
 
-                    # Keep Web Push alerts strictly gated by user's /settings size, fabric & threshold rules
-                    if notifier is not None and strict_res.passed:
-                        should_send, notify_reason = notifier.should_notify_product(
-                            product,
-                            analysis=analysis,
-                            user_settings=user_settings,
-                            existing_product=existing_row,
-                            ai_score=persisted_ai_score,
-                        )
-                        if should_send:
-                            push_report = notifier.notify_product(
-                                product,
-                                product_id=str(saved_row["id"]),
-                                matched_sizes=strict_res.matched_sizes,
-                                lowest_price_days=analysis.lowest_price_days,
-                                ai_score=persisted_ai_score,
-                            )
-                            if push_report.sent > 0:
-                                notified_count += 1
-                        else:
-                            logger.debug(
-                                "[%s] Skipping push for %s (%s)",
-                                brand,
-                                product.external_id,
-                                notify_reason,
-                            )
-            except Exception as exc:  # noqa: BLE001 — isolate single product save failure
-                logger.warning("[%s] Failed processing product %s: %s", brand, product.external_id, exc)
-                final_status = ScrapeStatus.PARTIAL
-                pipeline_error = f"Partial save error: {exc}"
-
-        if final_status == ScrapeStatus.SUCCESS and scrape_result.fetched_count > 0:
+        # Only include brand in 72h stale cleanup if scrape completed cleanly without budget cutoff
+        if (
+            final_status == ScrapeStatus.SUCCESS
+            and scrape_result.fetched_count > 0
+            and not getattr(scraper, "budget_exceeded", False)
+        ):
             succeeded_brands.append(brand)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
@@ -870,6 +1120,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Çalıştırma başına maksimum Gemini AI puanlama sayısı (opsiyonel kota sınırı).",
+    )
+    parser.add_argument(
+        "--max-ai-scores-per-brand",
+        type=int,
+        default=DEFAULT_MAX_AI_SCORES_PER_BRAND,
+        help=f"Marka başına maksimum yeni Gemini AI puanlama sayısı (varsayılan: {DEFAULT_MAX_AI_SCORES_PER_BRAND}).",
+    )
+    parser.add_argument(
+        "--brand-timeout",
+        type=float,
+        default=DEFAULT_BRAND_TIME_BUDGET_SECONDS,
+        help=f"Marka başına yumuşak tarama süre bütçesi, saniye (varsayılan: {int(DEFAULT_BRAND_TIME_BUDGET_SECONDS)}).",
     )
     parser.add_argument(
         "--log-level",

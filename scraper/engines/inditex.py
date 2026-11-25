@@ -13,6 +13,7 @@ from typing import Any, Literal
 from curl_cffi import requests as curl_requests
 
 from .base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     BaseScraper,
     ProductCategory,
     ProductGender,
@@ -341,14 +342,15 @@ class InditexScraper(BaseScraper):
         only_discounted: bool = True,
         include_regular_categories: bool = False,
         max_categories: int = 12,
-        max_detail_fetches: int = 60,
+        max_detail_fetches: int = 36,
         batch_size: int = 50,
         max_batches_per_category: int = 15,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 1.0,
-        max_jitter_seconds: float = 3.0,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.25,
+        max_jitter_seconds: float = 0.6,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         brand_key = brand.strip().lower()
         if brand_key not in INDITEX_BRAND_CONFIGS:
@@ -363,6 +365,7 @@ class InditexScraper(BaseScraper):
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )
 
         self.section = section
@@ -417,17 +420,33 @@ class InditexScraper(BaseScraper):
     def _is_blocked_body(text: str) -> bool:
         return is_blocked_body(text)
 
-    def _get_json(self, url: str) -> Any:
+    def _get_json(
+        self,
+        url: str,
+        *,
+        timeout_seconds: int | float | None = None,
+        max_retries: int | None = None,
+    ) -> Any:
         """Execute a GET request expecting JSON, with impersonate rotation and backoff."""
         last_error: Exception | None = None
+        effective_timeout = (
+            max(3, int(timeout_seconds))
+            if timeout_seconds is not None
+            else self.timeout_seconds
+        )
+        effective_retries = (
+            max(0, int(max_retries))
+            if max_retries is not None
+            else self.max_retries
+        )
 
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(effective_retries + 1):
             session = self._get_session() if attempt == 0 else self._rotate_session()
             try:
                 resp = session.get(
                     url,
                     headers=self._build_headers(),
-                    timeout=self.timeout_seconds,
+                    timeout=effective_timeout,
                 )
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
@@ -435,12 +454,12 @@ class InditexScraper(BaseScraper):
                     "[%s] Request error on attempt %d/%d (%s): %s",
                     self.brand,
                     attempt + 1,
-                    self.max_retries + 1,
+                    effective_retries + 1,
                     url,
                     exc,
                 )
-                if attempt < self.max_retries:
-                    time.sleep(random.uniform(1.5, 3.5) * (attempt + 1))
+                if attempt < effective_retries:
+                    time.sleep(random.uniform(0.8, 1.8) * (attempt + 1))
                 continue
 
             if resp.status_code in (403, 429) or self._is_blocked_body(resp.text):
@@ -452,18 +471,18 @@ class InditexScraper(BaseScraper):
                     self.brand,
                     resp.status_code,
                     attempt + 1,
-                    self.max_retries + 1,
+                    effective_retries + 1,
                     self._impersonate,
                 )
-                if attempt < self.max_retries:
-                    time.sleep(random.uniform(2.0, 4.5) * (attempt + 1))
+                if attempt < effective_retries:
+                    time.sleep(random.uniform(1.2, 2.5) * (attempt + 1))
                     continue
                 raise last_error
 
             if resp.status_code >= 500:
                 last_error = RuntimeError(f"HTTP {resp.status_code} server error on {url}")
-                if attempt < self.max_retries:
-                    time.sleep(random.uniform(1.5, 3.0) * (attempt + 1))
+                if attempt < effective_retries:
+                    time.sleep(random.uniform(0.8, 1.8) * (attempt + 1))
                     continue
                 raise last_error
 
@@ -631,6 +650,13 @@ class InditexScraper(BaseScraper):
             nonlocal category_failures
             scanned_failures = 0
             for idx, cat in enumerate(cat_list):
+                if self.is_budget_exceeded():
+                    logger.warning(
+                        "[%s] Soft time budget reached after %d unique items; stopping category scan.",
+                        self.brand,
+                        len(products_by_id),
+                    )
+                    break
                 if idx > 0:
                     self.sleep_jitter()
 
@@ -703,6 +729,14 @@ class InditexScraper(BaseScraper):
         consecutive_empty_batches = 0
         max_items = self.batch_size * self.max_batches_per_category
         for offset in range(0, min(len(product_ids), max_items), self.batch_size):
+            if self.is_budget_exceeded():
+                logger.warning(
+                    "[%s] Soft time budget reached mid-category %s (%d items kept).",
+                    self.brand,
+                    category.name,
+                    len(items),
+                )
+                break
             chunk = product_ids[offset : offset + self.batch_size]
             ids_csv = ",".join(str(pid) for pid in chunk)
 
@@ -1062,6 +1096,13 @@ class InditexScraper(BaseScraper):
         category_failures = 0
 
         for idx, cat in enumerate(categories):
+            if self.is_budget_exceeded(reserve_seconds=25.0):
+                logger.warning(
+                    "[%s] Soft time budget reached during Zara categories (%d candidates kept).",
+                    self.brand,
+                    len(raw_candidates),
+                )
+                break
             if idx > 0:
                 self.sleep_jitter()
             try:
@@ -1119,6 +1160,7 @@ class InditexScraper(BaseScraper):
         detail_fetches = 0
         pdp_blocked = False
 
+        detail_timeout = min(self.timeout_seconds, 10)
         for comp, cat, _ in ordered_candidates:
             pdp_payload: dict[str, Any] | None = None
             detail = comp.get("detail") or {}
@@ -1130,6 +1172,7 @@ class InditexScraper(BaseScraper):
                 and not pdp_blocked
                 and self.max_detail_fetches > 0
                 and detail_fetches < self.max_detail_fetches
+                and not self.is_budget_exceeded()
             ):
                 seo = comp.get("seo") or {}
                 kw = str(seo.get("keyword") or "").strip()
@@ -1137,10 +1180,14 @@ class InditexScraper(BaseScraper):
                 prod_id = comp.get("id")
                 if kw and seo_pid and prod_id:
                     if detail_fetches > 0:
-                        time.sleep(random.uniform(0.25, 0.65))
+                        time.sleep(random.uniform(0.15, 0.35))
                     pdp_url = f"https://{self.config.domain}/{self.config.store_path}/{kw}-p{seo_pid}.html?v1={prod_id}&ajax=true"
                     try:
-                        pdp_payload = self._get_json(pdp_url)
+                        pdp_payload = self._get_json(
+                            pdp_url,
+                            timeout_seconds=detail_timeout,
+                            max_retries=1,
+                        )
                         detail_fetches += 1
                     except ScraperBlockedError as exc:
                         if not products_by_id:

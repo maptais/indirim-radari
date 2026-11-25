@@ -10,6 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urlencode, urljoin
 
 from .base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     BaseScraper,
     ProductCategory,
     ProductGender,
@@ -122,13 +123,14 @@ class AkinonScraper(BaseScraper):
         only_discounted: bool = True,
         max_categories: int = 4,
         max_pages_per_category: int = 10,
-        max_detail_fetches: int = 48,
+        max_detail_fetches: int = 28,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.6,
-        max_jitter_seconds: float = 1.6,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.2,
+        max_jitter_seconds: float = 0.5,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         self.config = config
         self.brand = config.brand
@@ -138,6 +140,7 @@ class AkinonScraper(BaseScraper):
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )
 
         self.section = section
@@ -560,12 +563,28 @@ class AkinonScraper(BaseScraper):
         category_failures = 0
 
         for cat_idx, path in enumerate(selected_paths):
+            if self.is_budget_exceeded(reserve_seconds=25.0):
+                logger.warning(
+                    "[%s] Soft time budget reached during listing (%d candidates collected); moving to save.",
+                    self.brand,
+                    len(candidates),
+                )
+                break
             if cat_idx > 0:
                 self.sleep_jitter()
 
             cat_failed = False
             consecutive_empty_pages = 0
             for page in range(1, self.max_pages_per_category + 1):
+                if self.is_budget_exceeded(reserve_seconds=25.0):
+                    logger.warning(
+                        "[%s] Soft time budget reached on %s page %d (%d candidates collected).",
+                        self.brand,
+                        path,
+                        page,
+                        len(candidates),
+                    )
+                    break
                 if page > 1:
                     self.sleep_jitter()
 
@@ -656,6 +675,7 @@ class AkinonScraper(BaseScraper):
         products_by_id: dict[str, ProductItem] = {}
         detail_fetches = 0
         detail_blocked = False
+        detail_timeout = min(self.timeout_seconds, 10)
 
         for raw_prod, path in candidates:
             detail_payload: dict[str, Any] | None = None
@@ -663,13 +683,18 @@ class AkinonScraper(BaseScraper):
                 self.fetch_variant_details
                 and not detail_blocked
                 and detail_fetches < self.max_detail_fetches
+                and not self.is_budget_exceeded()
             ):
                 abs_url = str(raw_prod.get("absolute_url") or "")
                 if detail_fetches > 0:
                     # Polite shorter jitter between detail calls
-                    self.sleep_jitter()
+                    self.sleep_jitter(scale=0.6)
                 try:
-                    detail_payload = self.http.get_json(self._build_detail_url(abs_url))
+                    detail_payload = self.http.get_json(
+                        self._build_detail_url(abs_url),
+                        timeout_seconds=detail_timeout,
+                        max_retries=1,
+                    )
                     detail_fetches += 1
                 except ScraperBlockedError as exc:
                     if not products_by_id:
@@ -708,13 +733,14 @@ class ErenScraper(AkinonScraper):
         only_discounted: bool = True,
         max_categories: int = 4,
         max_pages_per_category: int = 10,
-        max_detail_fetches: int = 48,
+        max_detail_fetches: int = 28,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.3,
-        max_jitter_seconds: float = 0.8,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.15,
+        max_jitter_seconds: float = 0.45,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         brand_key = brand.strip().lower()
         if brand_key not in EREN_BRAND_CONFIGS:
@@ -734,4 +760,5 @@ class ErenScraper(AkinonScraper):
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )

@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import urlparse
@@ -188,6 +189,27 @@ def fetch_product_image(
         return None
 
 
+def is_new_or_price_dropped(
+    product: ProductItem,
+    existing_product: dict[str, Any] | None,
+    *,
+    price_drop_tolerance_try: Decimal = Decimal("1.00"),
+) -> bool:
+    """Return True if the product is brand-new or its effective price dropped below DB price."""
+    if existing_product is None:
+        return True
+    prev_current_raw = existing_product.get("current_price")
+    if prev_current_raw is None:
+        return True
+    prev_eff = Decimal(str(prev_current_raw))
+    prev_cart_raw = existing_product.get("cart_price")
+    if prev_cart_raw is not None:
+        prev_cart = Decimal(str(prev_cart_raw))
+        if Decimal("0") < prev_cart < prev_eff:
+            prev_eff = prev_cart
+    return product.effective_price < (prev_eff - price_drop_tolerance_try)
+
+
 class AIStyleScorer:
     """Scores filtered products against the user's style profile using Google Gemini."""
 
@@ -225,8 +247,8 @@ class AIStyleScorer:
             lambda url: fetch_product_image(
                 url,
                 timeout_seconds=min(
-                    10,
-                    self._settings.request_timeout_seconds if self._settings else 10,
+                    6,
+                    self._settings.request_timeout_seconds if self._settings else 6,
                 ),
             )
         )
@@ -247,18 +269,29 @@ class AIStyleScorer:
         """Return True when a Gemini client is ready to score products."""
         return self._client is not None
 
+    is_new_or_price_dropped = staticmethod(is_new_or_price_dropped)
+
     @staticmethod
     def should_score_product(
         analysis: PriceAnalysis,
         *,
         existing_product: dict[str, Any] | None = None,
+        product: ProductItem | None = None,
+        price_drop_tolerance_try: Decimal = Decimal("1.00"),
     ) -> tuple[bool, str]:
-        """Score only real-discount products that do not already have an AI score."""
+        """Score only new or price-dropped real-discount products that lack an AI score."""
         if not analysis.is_real_discount:
             return False, "not_real_discount"
 
-        if existing_product is not None and existing_product.get("ai_score") is not None:
-            return False, "already_scored"
+        if existing_product is not None:
+            if existing_product.get("ai_score") is not None:
+                return False, "already_scored"
+            if product is not None and not is_new_or_price_dropped(
+                product,
+                existing_product,
+                price_drop_tolerance_try=price_drop_tolerance_try,
+            ):
+                return False, "existing_unchanged_price"
 
         return True, "eligible"
 

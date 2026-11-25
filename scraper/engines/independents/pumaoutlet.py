@@ -12,6 +12,7 @@ from typing import Any, Literal
 from urllib.parse import urljoin
 
 from ..base import (
+    DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     BaseScraper,
     ProductCategory,
     ProductGender,
@@ -125,18 +126,20 @@ class PumaOutletScraper(BaseScraper):
         only_discounted: bool = True,
         max_categories: int = 3,
         max_pages_per_category: int = 10,
-        max_detail_fetches: int = 40,
+        max_detail_fetches: int = 24,
         fetch_variant_details: bool = True,
         max_retries: int = 2,
         impersonate: str | None = None,
-        timeout_seconds: int = 20,
-        min_jitter_seconds: float = 0.3,
-        max_jitter_seconds: float = 0.8,
+        timeout_seconds: int = 15,
+        min_jitter_seconds: float = 0.15,
+        max_jitter_seconds: float = 0.45,
+        max_duration_seconds: float | None = DEFAULT_BRAND_TIME_BUDGET_SECONDS,
     ) -> None:
         super().__init__(
             timeout_seconds=timeout_seconds,
             min_jitter_seconds=min_jitter_seconds,
             max_jitter_seconds=max_jitter_seconds,
+            max_duration_seconds=max_duration_seconds,
         )
         self.section = section
         self.only_discounted = only_discounted
@@ -337,12 +340,21 @@ class PumaOutletScraper(BaseScraper):
         cat_failures = 0
 
         for cat_idx, path in enumerate(selected_paths):
+            if self.is_budget_exceeded(reserve_seconds=25.0):
+                logger.warning(
+                    "[%s] Soft time budget reached during listing (%d candidates kept).",
+                    self.brand,
+                    len(candidates),
+                )
+                break
             if cat_idx > 0:
                 self.sleep_jitter()
 
             cat_failed = False
             consecutive_empty_pages = 0
             for page in range(1, self.max_pages_per_category + 1):
+                if self.is_budget_exceeded(reserve_seconds=25.0):
+                    break
                 if page > 1:
                     self.sleep_jitter()
                 base_qs = "product_list_order=discount&product_list_dir=desc"
@@ -403,6 +415,7 @@ class PumaOutletScraper(BaseScraper):
         detail_fetches = 0
         pdp_blocked = False
 
+        detail_timeout = min(self.timeout_seconds, 10)
         for card in candidates:
             available_sizes: list[str] = []
             is_critical_stock = False
@@ -412,11 +425,16 @@ class PumaOutletScraper(BaseScraper):
                 self.fetch_variant_details
                 and not pdp_blocked
                 and detail_fetches < self.max_detail_fetches
+                and not self.is_budget_exceeded()
             ):
                 if detail_fetches > 0:
-                    self.sleep_jitter()
+                    self.sleep_jitter(scale=0.6)
                 try:
-                    detail_html = self.http.get_text(card.url)
+                    detail_html = self.http.get_text(
+                        card.url,
+                        timeout_seconds=detail_timeout,
+                        max_retries=1,
+                    )
                     detail_fetches += 1
                     detail_fetched = True
                     available_sizes, is_critical_stock = self.extract_sizes_from_detail_html(detail_html)

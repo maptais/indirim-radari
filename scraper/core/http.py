@@ -653,12 +653,24 @@ class HttpClient:
         json_body: Any = None,
         data: Any = None,
         allow_redirects: bool = True,
+        timeout_seconds: int | float | None = None,
+        max_retries: int | None = None,
     ) -> Any:
         """Execute an HTTP request with retry, impersonate rotation, and WAF detection."""
         last_error: Exception | None = None
         merged_headers = self._merge_headers(headers)
+        effective_timeout = (
+            max(3, int(timeout_seconds))
+            if timeout_seconds is not None
+            else self.timeout_seconds
+        )
+        effective_retries = (
+            max(0, int(max_retries))
+            if max_retries is not None
+            else self.max_retries
+        )
 
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(effective_retries + 1):
             session = self.get_session() if attempt == 0 else self.rotate_session()
             try:
                 resp = session.request(
@@ -668,7 +680,7 @@ class HttpClient:
                     params=params,
                     json=json_body,
                     data=data,
-                    timeout=self.timeout_seconds,
+                    timeout=effective_timeout,
                     allow_redirects=allow_redirects,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -677,12 +689,12 @@ class HttpClient:
                     "[%s] Request error on attempt %d/%d (%s): %s",
                     self.brand,
                     attempt + 1,
-                    self.max_retries + 1,
+                    effective_retries + 1,
                     url,
                     exc,
                 )
-                if attempt < self.max_retries:
-                    time.sleep(random.uniform(1.5, 3.0) * (attempt + 1))
+                if attempt < effective_retries:
+                    time.sleep(random.uniform(0.8, 1.8) * (attempt + 1))
                 continue
 
             resp_text = resp.text or ""
@@ -695,18 +707,18 @@ class HttpClient:
                     self.brand,
                     resp.status_code,
                     attempt + 1,
-                    self.max_retries + 1,
+                    effective_retries + 1,
                     self._impersonate,
                 )
-                if attempt < self.max_retries:
-                    time.sleep(random.uniform(2.0, 4.0) * (attempt + 1))
+                if attempt < effective_retries:
+                    time.sleep(random.uniform(1.2, 2.5) * (attempt + 1))
                     continue
                 raise last_error
 
             if resp.status_code >= 500:
                 last_error = RuntimeError(f"HTTP {resp.status_code} server error on {url}")
-                if attempt < self.max_retries:
-                    time.sleep(random.uniform(1.5, 3.0) * (attempt + 1))
+                if attempt < effective_retries:
+                    time.sleep(random.uniform(0.8, 1.8) * (attempt + 1))
                     continue
                 raise last_error
 
@@ -725,13 +737,22 @@ class HttpClient:
         *,
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
+        timeout_seconds: int | float | None = None,
+        max_retries: int | None = None,
     ) -> str:
         req_headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
         if headers:
             req_headers.update(headers)
-        resp = self.request("GET", url, headers=req_headers, params=params)
+        resp = self.request(
+            "GET",
+            url,
+            headers=req_headers,
+            params=params,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
         return resp.text or ""
 
     def get_json(
@@ -740,13 +761,22 @@ class HttpClient:
         *,
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
+        timeout_seconds: int | float | None = None,
+        max_retries: int | None = None,
     ) -> Any:
         req_headers = {
             "Accept": "application/json, text/plain, */*",
         }
         if headers:
             req_headers.update(headers)
-        resp = self.request("GET", url, headers=req_headers, params=params)
+        resp = self.request(
+            "GET",
+            url,
+            headers=req_headers,
+            params=params,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
         try:
             return resp.json()
         except Exception as exc:  # noqa: BLE001
@@ -764,6 +794,8 @@ class HttpClient:
         data: Any = None,
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
+        timeout_seconds: int | float | None = None,
+        max_retries: int | None = None,
     ) -> Any:
         req_headers = {
             "Accept": "application/json, text/plain, */*",
@@ -777,6 +809,8 @@ class HttpClient:
             params=params,
             json_body=json_body,
             data=data,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
         )
         try:
             return resp.json()
