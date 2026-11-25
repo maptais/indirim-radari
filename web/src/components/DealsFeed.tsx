@@ -399,6 +399,8 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
   const lastAutoRefreshRef = useRef<number>(0);
   const requestSeqRef = useRef<number>(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const brandStripRef = useRef<HTMLDivElement | null>(null);
+  const categoryStripRef = useRef<HTMLDivElement | null>(null);
 
   const currentParamsRef = useRef<FetchParams>({
     genders: prefs.genders,
@@ -767,6 +769,47 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
     return () => window.clearTimeout(t);
   }, [prefsFeedback]);
 
+  // Allow mouse-wheel horizontal scrolling on narrow desktop windows when chip strips overflow
+  useEffect(() => {
+    const strips = [brandStripRef.current, categoryStripRef.current].filter(
+      (el): el is HTMLDivElement => el !== null
+    );
+    if (strips.length === 0) return;
+
+    const handleHorizontalWheel = (event: WheelEvent) => {
+      const el = event.currentTarget as HTMLDivElement | null;
+      if (!el || el.scrollWidth <= el.clientWidth) return;
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+
+      const deltaPx =
+        event.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? event.deltaY * 16
+          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? event.deltaY * el.clientWidth
+            : event.deltaY;
+
+      const maxScrollLeft = el.scrollWidth - el.clientWidth;
+      const nextScrollLeft = Math.min(
+        maxScrollLeft,
+        Math.max(0, el.scrollLeft + deltaPx)
+      );
+      if (nextScrollLeft !== el.scrollLeft) {
+        event.preventDefault();
+        el.scrollLeft = nextScrollLeft;
+      }
+    };
+
+    for (const el of strips) {
+      el.addEventListener("wheel", handleHorizontalWheel, { passive: false });
+    }
+
+    return () => {
+      for (const el of strips) {
+        el.removeEventListener("wheel", handleHorizontalWheel);
+      }
+    };
+  }, []);
+
   const toggleQuickGender = (gender: ProductGender) => {
     updatePersistedPrefs((prev) => {
       if (prev.genders === "all") {
@@ -1028,9 +1071,14 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
           className="space-y-3 rounded-3xl border border-white/10 bg-zinc-900/60 p-3.5"
         >
           {/* Search + Action Controls */}
-          <div className="flex flex-col gap-2.5 sm:flex-row">
-            <div className="relative flex-1">
-              <Search className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+          <div className="flex flex-col gap-2.5">
+            <div className="relative w-full self-start">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-zinc-500"
+              >
+                <Search className="h-4 w-4" />
+              </span>
               <input
                 type="search"
                 value={searchQuery}
@@ -1043,7 +1091,7 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
                   type="button"
                   onClick={() => setSearchQuery("")}
                   aria-label="Aramayı temizle"
-                  className="absolute top-1/2 right-3 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"
+                  className="absolute inset-y-0 right-3 flex items-center text-zinc-500 hover:text-zinc-200"
                 >
                   <X className="h-4 w-4" />
                 </button>
@@ -1160,7 +1208,12 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
               </button>
 
               <div className="relative flex-1 sm:flex-none">
-                <SlidersHorizontal className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-zinc-500"
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                </span>
                 <select
                   aria-label="Sıralama"
                   value={prefs.sort}
@@ -1435,7 +1488,10 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
           {/* Brand Chips with Real Counts */}
           <div className="space-y-1.5">
             <span className="text-[11px] font-medium text-zinc-500">Marka</span>
-            <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto pb-0.5">
+            <div
+              ref={brandStripRef}
+              className="flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1 pointer-coarse:[scrollbar-width:none] pointer-coarse:[&::-webkit-scrollbar]:hidden pointer-fine:[scrollbar-color:rgba(255,255,255,0.22)_transparent] pointer-fine:[scrollbar-width:thin] md:flex-wrap md:overflow-visible md:pb-0.5"
+            >
               <button
                 type="button"
                 onClick={() => setSelectedBrand("all")}
@@ -1478,7 +1534,10 @@ export function DealsFeed({ initialData, initialError = null }: DealsFeedProps) 
             <span className="text-[11px] font-medium text-zinc-500">
               Kategori
             </span>
-            <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto pb-0.5">
+            <div
+              ref={categoryStripRef}
+              className="flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1 pointer-coarse:[scrollbar-width:none] pointer-coarse:[&::-webkit-scrollbar]:hidden pointer-fine:[scrollbar-color:rgba(255,255,255,0.22)_transparent] pointer-fine:[scrollbar-width:thin] md:flex-wrap md:overflow-visible md:pb-0.5"
+            >
               <button
                 type="button"
                 onClick={() => setSelectedCategory("all")}
