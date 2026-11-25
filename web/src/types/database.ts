@@ -73,12 +73,28 @@ export interface PushSubscriptionRow {
   updated_at: string;
 }
 
+export interface DefaultUserPrefs {
+  targetGenders: ProductGender[];
+  topSizes: string[];
+  bottomSizes: string[];
+  shoeSizes: string[];
+}
+
 export interface ProductsApiResponse {
   products: ProductRow[];
   brands: string[];
+  brandCounts: Record<string, number>;
   targetGenders: ProductGender[];
+  defaultPrefs: DefaultUserPrefs;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+  totalCount: number;
+  realDiscountCount: number;
+  criticalStockCount: number;
   stats: {
     totalActive: number;
+    totalCatalog: number;
     realDiscountCount: number;
     criticalStockCount: number;
     cartPromoCount: number;

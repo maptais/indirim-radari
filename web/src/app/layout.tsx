@@ -13,6 +13,10 @@ export const metadata: Metadata = {
     "Kişisel beden, kumaş ve fiyat hafızasıyla gerçek indirimleri yakalayan akıllı iOS PWA takip sistemi.",
   manifest: "/manifest.json",
   applicationName: "İndirim Radarı",
+  robots: {
+    index: false,
+    follow: false,
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",

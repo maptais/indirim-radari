@@ -1,10 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import {
   CheckCircle2,
   Clock,
   Filter,
+  Info,
   Loader2,
   Plus,
   Ruler,
@@ -290,6 +292,27 @@ export function SettingsForm({
       </header>
 
       <div className="space-y-4 px-4 pt-4">
+        {/* Shared Global Settings Info Banner */}
+        <div className="flex items-start gap-2.5 rounded-2xl border border-sky-400/25 bg-sky-500/10 px-4 py-3 text-xs leading-relaxed text-sky-100/90">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-300" />
+          <p>
+            <strong className="font-semibold text-sky-200">
+              Genel Tarama ve Bildirim Ayarları:
+            </strong>{" "}
+            Bu sayfadaki değişiklikler ortak veritabanını, arka plan tarayıcısını
+            ve Web Push bildirim kurallarını günceller. Yalnızca kendi cihazınız
+            için bağımsız beden/cinsiyet filtrelemek isterseniz{" "}
+            <Link
+              href="/"
+              className="font-semibold text-emerald-300 underline decoration-emerald-400/50 underline-offset-2 hover:text-emerald-200"
+            >
+              Ana Sayfa
+            </Link>{" "}
+            üzerindeki <strong className="text-white">Bedenim / Cinsiyet</strong>{" "}
+            menüsünü kullanabilirsiniz.
+          </p>
+        </div>
+
         {/* Web Push Subscription Card */}
         <PushControl variant="card" />
 
